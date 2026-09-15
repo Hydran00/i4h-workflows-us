@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# One remote task. us_dp has its own torch/diffusers/timm pins (and USFM's
+# usdsgen), so nothing here can import it -- the declaration has to be data,
+# same as openpi_pi0/gr00t_n1x's manifests.
+#
+# summary / prompt / embodiment / cameras are read in the light venv.
+# model                              is read only by this stack's server.py,
+#                                    in this stack's own venv.
+
+summary: Perform a liver ultrasound sweep with a position-only diffusion-over-splines policy
+prompt: Perform a liver ultrasound.
+embodiment: panda
+cameras:
+- ultrasound
+model:
+  # No default checkpoint: always pass --checkpoint (run.sh's --checkpoint flag).
+  checkpoint: ""

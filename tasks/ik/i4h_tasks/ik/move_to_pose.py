@@ -58,7 +58,10 @@ class MoveToPose(Task):
         *,
         duration_s: float = 1.0,
         position_tolerance: float = 0.005,
+        orientation_tolerance: float | None = None,
+        interpolate_orientation: bool = True,
         settle_timeout_s: float = 2.0,
+        position_stall_timeout_s: float | None = None,
         robot: str = "robot",
         gripper: float | None = None,
         name: str | None = None,
@@ -66,7 +69,17 @@ class MoveToPose(Task):
         super().__init__(name=name)
         self.duration_s = duration_s
         self.position_tolerance = position_tolerance
+        #: Radians; None (default) keeps the original position-only check, so
+        #: existing callers are unaffected. Measured via the quaternion dot
+        #: product, so a near-antipodal q/-q pair still reads as ~0 error.
+        self.orientation_tolerance = orientation_tolerance
+        self.interpolate_orientation = interpolate_orientation
         self.settle_timeout_s = settle_timeout_s
+        if position_stall_timeout_s is not None and (
+            not np.isfinite(position_stall_timeout_s) or position_stall_timeout_s <= 0
+        ):
+            raise ValueError("position_stall_timeout_s must be positive and finite")
+        self.position_stall_timeout_s = position_stall_timeout_s
         self.robot = robot
         self.gripper = gripper
         self._start: Pose | None = None
@@ -87,6 +100,9 @@ class MoveToPose(Task):
         self._steps = max(1, round(self.duration_s / ctx.dt))
         self._tick = 0
         self._reached = False
+        self._position_best = None
+        self._position_stale_steps = None
+        self._waiting_for = None
         logger.debug(
             "%s target: start=%s goal=%s",
             self.name,
@@ -102,7 +118,8 @@ class MoveToPose(Task):
         self._tick += 1
         alpha = min(1.0, self._tick / self._steps)
         eased = alpha * alpha * (3.0 - 2.0 * alpha)
-        quat = self._goal.quat if eased >= 1.0 else slerp(self._start.quat, self._goal.quat, eased)
+        quat = (self._goal.quat if not self.interpolate_orientation or eased >= 1.0
+                else slerp(self._start.quat, self._goal.quat, eased))
         command = Pose(
             pos=self._start.pos + (self._goal.pos - self._start.pos) * eased,
             # At the endpoint preserve the target's exact quaternion sign.
@@ -118,24 +135,67 @@ class MoveToPose(Task):
         if self._tick < self._steps:
             return Status.RUNNING
 
-        error = ctx.scene.tcp(self.robot).distance_to(self._goal)
-        if bool((error < self.position_tolerance).all()):
+        current = ctx.scene.tcp(self.robot)
+        error = current.distance_to(self._goal)
+        orientation_error = self._orientation_error_rad(current)
+        position_ok = bool((error < self.position_tolerance).all())
+        orientation_ok = self.orientation_tolerance is None or bool(
+            (orientation_error < self.orientation_tolerance).all()
+        )
+        if position_ok and orientation_ok:
             self._reached = True
             return Status.SUCCESS
+        waiting_for = "orientation" if position_ok else "position"
+        if self.position_stall_timeout_s is not None:
+            if waiting_for != self._waiting_for:
+                logger.info(
+                    "%s waiting_for=%s xyz_error_m=%s orientation_error_rad=%s current=%s target=%s",
+                    self.name, waiting_for, (self._goal.pos - current.pos).round(5).tolist(),
+                    orientation_error.round(5).tolist(), current.pos.round(5).tolist(),
+                    self._goal.pos.round(5).tolist(),
+                )
+                self._waiting_for = waiting_for
+            if self._position_best is None:
+                self._position_best = np.array(error, copy=True)
+                self._position_stale_steps = np.zeros_like(error, dtype=int)
+            else:
+                # Rotation alone must not count as translational progress.
+                progressed = error < self._position_best - 0.001
+                reached = error < self.position_tolerance
+                self._position_best = np.where(progressed | reached, error, self._position_best)
+                self._position_stale_steps = np.where(
+                    progressed | reached, 0, self._position_stale_steps + 1)
+                stalled = (~reached) & (
+                    self._position_stale_steps * ctx.dt >= self.position_stall_timeout_s)
+                if np.any(stalled):
+                    logger.warning(
+                        "%s translation stalled: xyz_error_m=%s current=%s target=%s; failing attempt",
+                        self.name, (self._goal.pos - current.pos).round(5).tolist(),
+                        current.pos.round(5).tolist(), self._goal.pos.round(5).tolist(),
+                    )
+                    return Status.FAILURE
         # Keep commanding the goal while the controller closes the gap; give up
         # only after the settle budget so a stuck arm fails rather than hangs.
         overrun = (self._tick - self._steps) * ctx.dt
         if overrun < self.settle_timeout_s:
             return Status.RUNNING
         logger.warning(
-            "%s failed to reach target: error_m=%s tolerance_m=%.4f current=%s target=%s",
+            "%s failed to reach target: error_m=%s tolerance_m=%.4f orientation_error_rad=%s"
+            " orientation_tolerance_rad=%s current=%s target=%s",
             self.name,
             np.asarray(error).round(5).tolist(),
             self.position_tolerance,
-            ctx.scene.tcp(self.robot).pos.round(5).tolist(),
+            np.asarray(orientation_error).round(5).tolist(),
+            self.orientation_tolerance,
+            current.pos.round(5).tolist(),
             self._goal.pos.round(5).tolist(),
         )
         return Status.FAILURE
+
+    def _orientation_error_rad(self, current: Pose) -> np.ndarray:
+        """Angle between current and goal orientation; sign-invariant (q and -q match)."""
+        dot = np.sum(current.quat * self._goal.quat, axis=-1)
+        return 2.0 * np.arccos(np.clip(np.abs(dot), -1.0, 1.0))
 
     def on_exit(self, ctx: TickContext) -> Outputs:
         return self.Outputs(reached=self._reached, tcp=ctx.scene.tcp(self.robot))

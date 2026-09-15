@@ -124,3 +124,15 @@ def test_satisfied_on_an_empty_mask_is_false():
 
     assert satisfied(np.array([], dtype=bool)) is False
     assert satisfied(np.array([], dtype=bool), across="all") is False
+
+
+def test_scan_orientation_is_previous_final_waypoint_with_no_random_rotation():
+    from i4h_common.ultrasound_scan import PROBE_SCAN_LOCAL_WXYZ, scan_orientation
+    from i4h_common.types import quat_mul
+
+    phantom = np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
+    previous_local = quat_mul(np.array([0, 1, 0, 0], dtype=np.float32),
+                              np.array([np.cos(np.pi / 12), 0, 0, np.sin(np.pi / 12)], dtype=np.float32))
+    np.testing.assert_allclose(PROBE_SCAN_LOCAL_WXYZ, previous_local)
+    expected = quat_mul(phantom, previous_local[None])
+    np.testing.assert_allclose(scan_orientation(phantom), expected)

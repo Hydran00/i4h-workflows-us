@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Focused tests for private third-party repository transport selection."""
+"""Focused tests for GitHub third-party repository transport selection."""
 
 from __future__ import annotations
 
@@ -65,40 +65,43 @@ def _run_setup(tmp_path: Path, root_origin: str) -> tuple[subprocess.CompletedPr
     return result, git_log.read_text(encoding="utf-8") if git_log.exists() else ""
 
 
-def test_private_repositories_follow_ssh_root_origin(tmp_path: Path) -> None:
+def test_github_repositories_follow_ssh_root_origin(tmp_path: Path) -> None:
     result, git_log = _run_setup(
         tmp_path,
-        "git@github.com:isaac-for-healthcare/i4h-workflows-internal.git",
+        "git@github.com:isaac-for-healthcare/i4h-workflows.git",
     )
 
     assert result.returncode == 0, result.stderr
-    assert "private repository transport: ssh" in result.stdout
-    assert "remote set-url origin git@github.com:isaac-for-healthcare/i4h-physics-simulation-internal.git" in git_log
-    assert "remote set-url origin git@github.com:isaac-for-healthcare/i4h-sensor-simulation-internal.git" in git_log
-    assert "remote set-url origin git@github.com:isaac-for-healthcare/i4h-digital-twin-internal.git" in git_log
+    assert "GitHub repository transport: ssh" in result.stdout
+    assert "remote set-url origin git@github.com:isaac-sim/IsaacSim.git" in git_log
+    assert "remote set-url origin git@github.com:isaac-for-healthcare/i4h-physics-simulation.git" in git_log
+    assert "remote set-url origin git@github.com:isaac-for-healthcare/i4h-sensor-simulation.git" in git_log
+    assert "remote set-url origin git@github.com:isaac-for-healthcare/i4h-digital-twin.git" in git_log
 
 
-def test_private_repositories_follow_https_root_origin(tmp_path: Path) -> None:
+def test_github_repositories_follow_https_root_origin(tmp_path: Path) -> None:
     result, git_log = _run_setup(
         tmp_path,
-        "https://github.com/isaac-for-healthcare/i4h-workflows-internal.git",
+        "https://github.com/isaac-for-healthcare/i4h-workflows.git",
     )
 
     assert result.returncode == 0, result.stderr
-    assert "private repository transport: https" in result.stdout
+    assert "GitHub repository transport: https" in result.stdout
+    assert "remote set-url origin https://github.com/isaac-sim/IsaacSim.git" in git_log
     assert (
-        "remote set-url origin https://github.com/isaac-for-healthcare/i4h-physics-simulation-internal.git" in git_log
+        "remote set-url origin https://github.com/isaac-for-healthcare/i4h-physics-simulation.git" in git_log
     )
-    assert "remote set-url origin https://github.com/isaac-for-healthcare/i4h-sensor-simulation-internal.git" in git_log
-    assert "remote set-url origin https://github.com/isaac-for-healthcare/i4h-digital-twin-internal.git" in git_log
+    assert "remote set-url origin https://github.com/isaac-for-healthcare/i4h-sensor-simulation.git" in git_log
+    assert "remote set-url origin https://github.com/isaac-for-healthcare/i4h-digital-twin.git" in git_log
 
 
-def test_private_repositories_default_to_https_without_root_origin(tmp_path: Path) -> None:
+def test_github_repositories_default_to_https_without_root_origin(tmp_path: Path) -> None:
     result, git_log = _run_setup(
         tmp_path,
         "",
     )
 
     assert result.returncode == 0, result.stderr
-    assert "private repository transport: https" in result.stdout
-    assert "https://github.com/isaac-for-healthcare/i4h-physics-simulation-internal.git" in git_log
+    assert "GitHub repository transport: https" in result.stdout
+    assert "remote set-url origin https://github.com/isaac-sim/IsaacSim.git" in git_log
+    assert "https://github.com/isaac-for-healthcare/i4h-physics-simulation.git" in git_log

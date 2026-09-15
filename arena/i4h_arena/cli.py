@@ -59,6 +59,11 @@ def build_parser() -> argparse.ArgumentParser:
     policy = parser.add_argument_group("policy")
     policy.add_argument("--checkpoint", default=None, help="override the manifest's model repo/path")
     policy.add_argument("--prompt", default=None, help="override the task description")
+    policy.add_argument(
+        "--task-id",
+        default=None,
+        help="override the policy mode's backend task id, e.g. us_dp/ultrasound_liver_scan",
+    )
 
     teleop = parser.add_argument_group("teleop")
     teleop.add_argument("--teleop-device", default=None)
@@ -96,6 +101,13 @@ def build_parser() -> argparse.ArgumentParser:
     simulation.add_argument("--presets", choices=("physx", "newton"), default="physx", help="Arena physics backend")
     simulation.add_argument("--spacing", type=float, default=4.0, dest="env_spacing")
     simulation.add_argument("--no-cameras", action="store_true")
+    simulation.add_argument(
+        "--ultrasound", action="store_true", help="enable OptiX B-mode in panda_phantom (Docker required)"
+    )
+    simulation.add_argument("--ultrasound-image", default="i4h_sim_build:ultrasound-simulator")
+    simulation.add_argument(
+        "--ultrasound-gpu", default="0", help="physical GPU index or UUID for the ultrasound container"
+    )
     simulation.add_argument("--headless", action="store_true")
     simulation.add_argument("--device", default="cuda:0", help="CUDA device for the simulation")
     simulation.add_argument(
@@ -195,6 +207,22 @@ def main(argv: list[str] | None = None) -> int:
     print(report.render())
     if not report.ok:
         return 1
+    if args.ultrasound and (workflow.scene != "panda_phantom" or args.no_cameras):
+        parser.error("--ultrasound requires panda_phantom with cameras enabled")
+    if not args.ultrasound:
+        # The scene only ever attaches the ultrasound sensor when this flag is
+        # set (PandaPhantomScene.configure_args) -- the lint above cannot see
+        # that, since it checks the scene's static declared cameras, which
+        # list ultrasound as available regardless. Without this, a task that
+        # requires it would silently never receive an image and the robot
+        # would just hold position forever instead of failing loudly.
+        needs_ultrasound = [
+            node.spec.id
+            for node in workflow.graph.nodes
+            if node.spec is not None and "ultrasound" in node.spec.requires.get("cameras", ())
+        ]
+        if needs_ultrasound:
+            parser.error(f"{', '.join(needs_ultrasound)} requires --ultrasound")
     if args.dry_run:
         print(f"dry-run: would launch scene {workflow.scene!r} for {args.episodes} episode(s)")
         return 0
@@ -220,6 +248,8 @@ def _build(args: argparse.Namespace, resolve_workflow) -> object:
             kwargs["device"] = args.teleop_device
     elif mode == "idle":
         kwargs = {"seconds": args.idle_seconds}
+    elif mode == "policy" and args.task_id:
+        kwargs = {"task_id": args.task_id}
     return resolve_workflow(args.workflow, args.mode or None, **kwargs)
 
 
@@ -228,12 +258,13 @@ def _launch(args: argparse.Namespace, workflow) -> int:
     from i4h_arena.app import launch_app
 
     with launch_app(args) as app_ctx:
+        from i4h_common.bus.keys import Keys
+        from i4h_common.bus.zenoh_bus import open_zenoh_bus
+
         from i4h_arena.io.publishers import ScenePublisher
         from i4h_arena.recording.hdf5 import EpisodeRecorder
         from i4h_arena.runner import SimulationRunner
         from i4h_arena.scenes.base import load_scene
-        from i4h_common.bus.keys import Keys
-        from i4h_common.bus.zenoh_bus import open_zenoh_bus
 
         # A SystemExit here is not ours: IsaacLab-Arena and the asset SDK call
         # sys.exit() on failures they consider fatal, which looks like a clean
@@ -296,6 +327,7 @@ def _launch(args: argparse.Namespace, workflow) -> int:
             print(summary.render())
             exit_code = 0 if summary.complete else 1
         finally:
+            scene.close()
             if publisher is not None:
                 publisher.close()
             if recorder is not None:

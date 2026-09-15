@@ -97,3 +97,49 @@ def test_scene_owned_footprint_is_batched():
         view.footprint_half_extents("table"),
         [[0.64, 0.4], [0.64, 0.4]],
     )
+
+
+def test_camera_reports_the_sensors_own_frame_id():
+    sensor = SimpleNamespace(
+        data=SimpleNamespace(
+            output={"rgb": np.zeros((1, 2, 2, 3), dtype=np.uint8)},
+            frame_id=np.array([7], dtype=np.int64),
+        )
+    )
+    env = SimpleNamespace(unwrapped=SimpleNamespace(scene={"ultrasound": sensor}, num_envs=1))
+
+    frame = ArenaSceneView(env, cameras=("ultrasound",)).camera("ultrasound")
+
+    assert frame is not None
+    assert frame.frame_num == 7
+
+
+def test_camera_defaults_frame_id_to_zero_without_a_sensor_clock():
+    sensor = SimpleNamespace(data=SimpleNamespace(output={"rgb": np.zeros((1, 2, 2, 3), dtype=np.uint8)}))
+    env = SimpleNamespace(unwrapped=SimpleNamespace(scene={"room_camera": sensor}, num_envs=1))
+
+    frame = ArenaSceneView(env, cameras=("room",), camera_aliases={"room": "room_camera"}).camera("room")
+
+    assert frame is not None
+    assert frame.frame_num == 0
+
+
+def test_phantom_recording_reads_world_calibrated_frames():
+    organ = SimpleNamespace(data=SimpleNamespace(
+        root_pos_w=np.array([[1., 2., 3.]]), root_quat_w=np.array([[0., 0., 0., 1.]])))
+    mesh = SimpleNamespace(data=SimpleNamespace(
+        target_pos_w=np.array([[[4., 5., 6.]]]),
+        target_quat_w=np.array([[[1., 0., 0., 0.]]])))
+    probe = SimpleNamespace(data=SimpleNamespace(
+        target_pos_w=np.array([[[7., 8., 9.]]]),
+        target_quat_w=np.array([[[0., 0., 0., 1.]]])))
+    env = SimpleNamespace(unwrapped=SimpleNamespace(
+        scene={'organs': organ, 'mesh_to_organ_transform': mesh, 'ee_to_us_transform': probe},
+        common_step_counter=12, step_dt=.02))
+    state = ArenaSceneView(env).phantom_recording_state()
+    np.testing.assert_allclose(state['phantom_pose'], [1, 2, 3, 1, 0, 0, 0])
+    np.testing.assert_allclose(state['mesh_pose'], [4, 5, 6, 0, 1, 0, 0])
+    np.testing.assert_allclose(state['ultrasound_probe_pose'], [7, 8, 9, 1, 0, 0, 0])
+    assert state['timestamps'] == .24
+    mesh.data.target_pos_w[:] = 0
+    assert state['mesh_pose'][0] == 4  # snapshots survive simulator buffer updates

@@ -6,16 +6,35 @@ Layout::
 
     /data                              attrs: env_args, total, ...
       demo_0                           attrs: success, num_samples, workflow, ...
-        actions            (T, A)      or obs/actions on compatible files
-        obs/joint_pos      (T, D)
-        obs/<camera>       (T, H, W, 3) uint8
-        segments           (S,)
+        actions              (T, A)      or obs/actions on compatible files
+        obs/joint_pos        (T, D)
+        obs/measured_ee_pose (T, 7)     xyz + wxyz, from the tcp sensor/link
+        obs/commanded_ee_pose(T, 7)     xyz + wxyz; optional, NaN rows where unset
+        obs/<camera>         (T, H, W, 3) uint8
+        obs/<camera>_frame_id(T,)         int64; optional, only for sensors with their own clock
+        segments             (S,)
 
 ``segments`` is a structured array of
 ``(node, task_id, start, end)`` recording which workflow node was active for each
 frame range. It is optional, and readers must tolerate its absence. With it,
 ``mimic`` can augment a single skill and ``annotator`` can label per skill
 instead of per episode — neither is expressible against a flat episode.
+
+``obs/measured_ee_pose`` is the tool pose the robot actually reached each step
+(``ArenaSceneView.tcp``): prefer it as an imitation-learning label over
+``actions``, which for a relative-Cartesian scene is a per-step delta, not an
+absolute pose, and never reflects tracking error under load.
+``obs/commanded_ee_pose`` is the absolute Cartesian target a task last asked
+for via ``ArenaActuation.set_ee_target`` (rows are NaN while no task is
+driving an explicit target, e.g. during ``locate``/``hold``); it is present
+only for scenes with an ``ee_pose`` action space, and is useful to diagnose
+controller tracking error, not as the training label.
+
+``obs/<camera>_frame_id`` is the sensor's own frame counter (0 for plain RGB
+cameras, which have none). A sensor that renders on its own schedule slower
+than the control loop -- the ultrasound B-mode backend updates at 10 Hz --
+otherwise looks identical across several consecutive, faster control steps;
+this lets a reader tell a genuinely new render from a repeated stale one.
 """
 
 from __future__ import annotations
@@ -158,11 +177,26 @@ class Episode:
         return self.group[path][()] if path else None
 
     @property
+    def measured_ee_pose(self) -> np.ndarray | None:
+        """(T, 7) xyz + wxyz tool pose actually reached each step, or None on older recordings."""
+        return self.group["obs/measured_ee_pose"][()] if "obs/measured_ee_pose" in self.group else None
+
+    @property
+    def commanded_ee_pose(self) -> np.ndarray | None:
+        """(T, 7) xyz + wxyz absolute Cartesian target, NaN rows where unset, or None if never used."""
+        return self.group["obs/commanded_ee_pose"][()] if "obs/commanded_ee_pose" in self.group else None
+
+    @property
     def cameras(self) -> list[str]:
         return camera_keys(self.group)
 
     def camera(self, name: str) -> np.ndarray:
         return self.group[f"obs/{name}"][()]
+
+    def camera_frame_id(self, name: str) -> np.ndarray | None:
+        """(T,) sensor frame counter for `name`, or None if it never reported one."""
+        path = f"obs/{name}_frame_id"
+        return self.group[path][()] if path in self.group else None
 
     @property
     def segments(self) -> tuple[Segment, ...]:

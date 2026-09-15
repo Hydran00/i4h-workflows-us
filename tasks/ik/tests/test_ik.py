@@ -86,6 +86,32 @@ def test_move_to_pose_fails_when_arm_never_arrives(ctx):
     assert task.on_exit(ctx).reached is False
 
 
+def test_move_to_pose_ignores_orientation_by_default(ctx):
+    # position_tolerance alone said nothing about orientation before this
+    # parameter existed; a caller that never asks for it keeps that behavior.
+    target = Pose.from_xyz(0.1, 0.0, 0.3)
+    task = MoveToPose(duration_s=0.05, name="m")
+    ctx.scene.tcp_pose = Pose(pos=target.pos.copy(), quat=np.array([[0.7071, 0.0, 0.0, 0.7071]], dtype=np.float32))
+    assert drive(task, ctx, MoveToPose.Inputs(target=target)) is Status.SUCCESS
+
+
+def test_move_to_pose_fails_on_orientation_even_with_correct_position(ctx):
+    target = Pose.from_xyz(0.1, 0.0, 0.3)
+    task = MoveToPose(duration_s=0.05, settle_timeout_s=0.05, orientation_tolerance=np.radians(5.0), name="m")
+    # Position matches exactly; orientation is 90 degrees off (well past a 5 degree tolerance).
+    ctx.scene.tcp_pose = Pose(pos=target.pos.copy(), quat=np.array([[0.7071, 0.0, 0.0, 0.7071]], dtype=np.float32))
+    assert drive(task, ctx, MoveToPose.Inputs(target=target)) is Status.FAILURE
+    assert task.on_exit(ctx).reached is False
+
+
+def test_move_to_pose_succeeds_within_orientation_tolerance(ctx):
+    target = Pose.from_xyz(0.1, 0.0, 0.3)
+    task = MoveToPose(duration_s=0.05, orientation_tolerance=np.radians(5.0), name="m")
+    ctx.scene.tcp_pose = target
+    assert drive(task, ctx, MoveToPose.Inputs(target=target)) is Status.SUCCESS
+    assert task.on_exit(ctx).reached is True
+
+
 def test_hold_pose_commands_the_current_tcp_each_tick(ctx):
     task = HoldPose(seconds=ctx.dt * 2)
     task.on_enter(ctx, object())
@@ -216,3 +242,36 @@ def test_every_ik_task_requires_ee_pose(spec):
         f"{spec.id} must declare requires = {{'action_space': 'ee_pose'}} on its class "
         f"so workflow-lint rejects it against joint-only embodiments"
     )
+
+
+def test_translation_stall_fails_before_settle_timeout(ctx, caplog):
+    task = MoveToPose(duration_s=DT, settle_timeout_s=4, position_stall_timeout_s=.1)
+    target = Pose.from_xyz(1., 0., 0.)
+    task.on_enter(ctx, MoveToPose.Inputs(target=target))
+    for i in range(12):
+        angle = i * .03
+        ctx.scene.tcp_pose = Pose(pos=np.zeros((1, 3)),
+                                 quat=np.array([[np.cos(angle), 0, 0, np.sin(angle)]]))
+        status = task.tick(ctx)
+        if status.is_terminal:
+            break
+    assert status is Status.FAILURE
+    assert 'translation stalled' in caplog.text
+
+
+def test_orientation_only_wait_is_not_translation_stall(ctx):
+    target = Pose(pos=np.zeros((1, 3)), quat=np.array([[0., 1., 0., 0.]]))
+    ctx.scene.tcp_pose = Pose.from_xyz(0., 0., 0.)
+    task = MoveToPose(duration_s=DT, settle_timeout_s=4, position_stall_timeout_s=.1,
+                      orientation_tolerance=.01)
+    task.on_enter(ctx, MoveToPose.Inputs(target=target))
+    for _ in range(20):
+        assert task.tick(ctx) is Status.RUNNING
+
+
+def test_translation_progress_resets_stall_clock(ctx):
+    task = MoveToPose(duration_s=DT, position_stall_timeout_s=.1)
+    task.on_enter(ctx, MoveToPose.Inputs(target=Pose.from_xyz(1., 0., 0.)))
+    for i in range(20):
+        ctx.scene.tcp_pose = Pose.from_xyz(i * .005, 0., 0.)
+        assert task.tick(ctx) is Status.RUNNING

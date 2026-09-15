@@ -142,3 +142,23 @@ def test_replay_builder_forwards_all_supported_arguments() -> None:
 def test_resolve_rejects_an_unexposed_mode() -> None:
     with pytest.raises(KeyError, match="has no mode 'policy'"):
         resolve_workflow("surgical_reach_psm", "policy")
+
+
+def test_ultrasound_sweep_detects_translation_stalls_without_changing_orientation():
+    resolved = resolve_workflow('ultrasound_liver_scan', 'rule-based')
+    nodes = {node.id: node.ref for node in resolved.graph.nodes}
+    for name in ('sweep_0', 'sweep_1'):
+        assert nodes[name].local_standoff
+        assert nodes[name].local_orientation
+        assert nodes[name].position_stall_timeout_s == 1.0
+
+
+def test_ultrasound_recorded_graph_has_only_fixed_orientation_sweep():
+    from i4h_common.ultrasound_scan import PROBE_SCAN_LOCAL_WXYZ
+    import numpy as np
+
+    resolved = resolve_workflow("ultrasound_liver_scan", "rule-based")
+    nodes = {node.id: node.ref for node in resolved.graph.nodes}
+    assert "approach" not in nodes and "make_contact" not in nodes
+    for name in ("sweep_0", "sweep_1"):
+        np.testing.assert_allclose(nodes[name].orientation, PROBE_SCAN_LOCAL_WXYZ)

@@ -26,6 +26,8 @@ ISAACSIM_SKILLS_DIR="IsaacSim-045ca8b"
 # source paths in arena/ and tools/patient_twin/ point here and must stay valid as main moves.
 # Export the matching *_REF variable to pin one to a commit when bisecting a break.
 I4H_PHYSICS_SIM_REF="${I4H_PHYSICS_SIM_REF:-main}"
+# Keep the legacy local directory names used by pyproject.toml and lockfiles;
+# the source repositories use their public names without the -internal suffix.
 I4H_PHYSICS_SIM_DIR="i4h-physics-simulation-internal"
 I4H_SENSOR_SIM_REF="${I4H_SENSOR_SIM_REF:-main}"
 I4H_SENSOR_SIM_DIR="i4h-sensor-simulation-internal"
@@ -51,20 +53,21 @@ export GIT_LFS_SKIP_SMUDGE=1
 
 mkdir -p "${THIRD_PARTY_DIR}"
 
-# Private component repositories follow the transport used to check out this repository.
+# GitHub repositories follow the transport used to check out this repository.
 # Jenkins checks out over HTTPS and supplies an askpass credential around setup.sh, while
 # developers who use an SSH origin can reuse their existing SSH agent. Archive/container
 # builds have no root origin, so they retain the existing HTTPS behavior.
 root_origin="$(git -C "${WORKFLOW_ROOT}" remote get-url origin 2>/dev/null || true)"
 case "${root_origin}" in
-  git@*:*|ssh://*|git+ssh://*) INTERNAL_GIT_TRANSPORT="ssh" ;;
-  *) INTERNAL_GIT_TRANSPORT="https" ;;
+  git@*:*|ssh://*|git+ssh://*) GIT_TRANSPORT="ssh" ;;
+  *) GIT_TRANSPORT="https" ;;
 esac
-case "${INTERNAL_GIT_TRANSPORT}" in
-  https) INTERNAL_GITHUB_BASE="https://github.com/isaac-for-healthcare" ;;
-  ssh) INTERNAL_GITHUB_BASE="git@github.com:isaac-for-healthcare" ;;
+case "${GIT_TRANSPORT}" in
+  https) GITHUB_BASE="https://github.com/" ;;
+  ssh) GITHUB_BASE="git@github.com:" ;;
 esac
-echo "[${LOG_PREFIX}] private repository transport: ${INTERNAL_GIT_TRANSPORT}"
+I4H_GITHUB_BASE="${GITHUB_BASE}isaac-for-healthcare"
+echo "[${LOG_PREFIX}] GitHub repository transport: ${GIT_TRANSPORT}"
 
 ensure_origin_url() {
   local repo_dir="$1"
@@ -104,6 +107,7 @@ checkout_ref() {
     mkdir -p "${repo_dir}"
     git -C "${repo_dir}" init
   fi
+  echo "[${LOG_PREFIX}] checking ${name}: ${url} @ ${ref}"
   ensure_origin_url "${repo_dir}" "${url}"
   if [[ "${ref}" =~ ^[0-9a-f]{40}$ ]]; then
     # A commit never moves, so fetch it once and reuse it on every later run.
@@ -138,6 +142,7 @@ checkout_sparse_ref() {
     mkdir -p "${repo_dir}"
     git -C "${repo_dir}" init
   fi
+  echo "[${LOG_PREFIX}] checking ${name}: ${url} @ ${ref}"
   ensure_origin_url "${repo_dir}" "${url}"
   git -C "${repo_dir}" sparse-checkout init --cone
   git -C "${repo_dir}" sparse-checkout set "${sparse_path}"
@@ -152,22 +157,22 @@ checkout_sparse_ref() {
 }
 
 arena_checkouts=(
-  "${ISAACLAB_DIR}|https://github.com/isaac-sim/IsaacLab.git|${ISAACLAB_REV}"
-  "${LEISAAC_DIR}|https://github.com/LightwheelAI/leisaac.git|${LEISAAC_REV}"
-  "${ISAACLAB_ARENA_DIR}|https://github.com/isaac-sim/IsaacLab-Arena.git|${ISAACLAB_ARENA_REV}"
-  "${I4H_PHYSICS_SIM_DIR}|${INTERNAL_GITHUB_BASE}/i4h-physics-simulation-internal.git|${I4H_PHYSICS_SIM_REF}"
-  "${I4H_SENSOR_SIM_DIR}|${INTERNAL_GITHUB_BASE}/i4h-sensor-simulation-internal.git|${I4H_SENSOR_SIM_REF}"
+  "${ISAACLAB_DIR}|${GITHUB_BASE}isaac-sim/IsaacLab.git|${ISAACLAB_REV}"
+  "${LEISAAC_DIR}|${GITHUB_BASE}LightwheelAI/leisaac.git|${LEISAAC_REV}"
+  "${ISAACLAB_ARENA_DIR}|${GITHUB_BASE}isaac-sim/IsaacLab-Arena.git|${ISAACLAB_ARENA_REV}"
+  "${I4H_PHYSICS_SIM_DIR}|${I4H_GITHUB_BASE}/i4h-physics-simulation.git|${I4H_PHYSICS_SIM_REF}"
+  "${I4H_SENSOR_SIM_DIR}|${I4H_GITHUB_BASE}/i4h-sensor-simulation.git|${I4H_SENSOR_SIM_REF}"
   # tools/patient_twin, not arena, consumes this one. It rides along with the arena target so
   # that a scoped `I4H_THIRD_PARTY_TARGET=arena` still produces a runnable twin pipeline.
-  "${I4H_DIGITAL_TWIN_DIR}|${INTERNAL_GITHUB_BASE}/i4h-digital-twin-internal.git|${I4H_DIGITAL_TWIN_REF}"
+  "${I4H_DIGITAL_TWIN_DIR}|${I4H_GITHUB_BASE}/i4h-digital-twin.git|${I4H_DIGITAL_TWIN_REF}"
 )
 policy_checkouts=(
-  "${GR00T_15_DIR}|https://github.com/NVIDIA/Isaac-GR00T.git|${GR00T_15_REV}"
-  "${GR00T_16_DIR}|https://github.com/NVIDIA/Isaac-GR00T.git|${GR00T_16_REV}"
-  "${GR00T_17_DIR}|https://github.com/NVIDIA/Isaac-GR00T.git|${GR00T_17_REV}"
-  "${OPENPI_DIR_NAME}|https://github.com/Physical-Intelligence/openpi.git|${OPENPI_REV}"
-  "${LEROBOT_DIR}|https://github.com/huggingface/lerobot.git|${LEROBOT_REV}"
-  "${RLINF_DIR}|https://github.com/RLinf/RLinf.git|${RLINF_REV}"
+  "${GR00T_15_DIR}|${GITHUB_BASE}NVIDIA/Isaac-GR00T.git|${GR00T_15_REV}"
+  "${GR00T_16_DIR}|${GITHUB_BASE}NVIDIA/Isaac-GR00T.git|${GR00T_16_REV}"
+  "${GR00T_17_DIR}|${GITHUB_BASE}NVIDIA/Isaac-GR00T.git|${GR00T_17_REV}"
+  "${OPENPI_DIR_NAME}|${GITHUB_BASE}Physical-Intelligence/openpi.git|${OPENPI_REV}"
+  "${LEROBOT_DIR}|${GITHUB_BASE}huggingface/lerobot.git|${LEROBOT_REV}"
+  "${RLINF_DIR}|${GITHUB_BASE}RLinf/RLinf.git|${RLINF_REV}"
 )
 
 checkouts=()
@@ -176,7 +181,7 @@ case "$TARGET" in
     checkouts=("${arena_checkouts[@]}" "${policy_checkouts[@]}")
     checkout_sparse_ref \
       "${ISAACSIM_SKILLS_DIR}" \
-      "https://github.com/isaac-sim/IsaacSim.git" \
+      "${GITHUB_BASE}isaac-sim/IsaacSim.git" \
       "${ISAACSIM_SKILLS_REV}" \
       "skills"
     ;;
@@ -184,7 +189,7 @@ case "$TARGET" in
     checkouts=("${arena_checkouts[@]}")
     checkout_sparse_ref \
       "${ISAACSIM_SKILLS_DIR}" \
-      "https://github.com/isaac-sim/IsaacSim.git" \
+      "${GITHUB_BASE}isaac-sim/IsaacSim.git" \
       "${ISAACSIM_SKILLS_REV}" \
       "skills"
     ;;

@@ -18,8 +18,8 @@ from typing import Any
 
 import h5py
 import numpy as np
-
 from i4h_common.episode import Segment, write_segments
+from i4h_common.types import Pose
 from i4h_engine.events import EventKind, WorkflowEvent
 
 logger = logging.getLogger("i4h_arena.recording")
@@ -42,8 +42,13 @@ class EpisodeRecorder:
         self._data.attrs.setdefault("mode", workflow.mode)
         self._data.attrs.setdefault("scene", workflow.scene)
 
+        self._phantom_samples: list[dict[str, np.ndarray]] = []
         self._actions: list[np.ndarray] = []
         self._states: list[np.ndarray] = []
+        self._velocities: list[np.ndarray] = []
+        self._measured_ee_poses: list[np.ndarray] = []
+        self._commanded_ee_poses: list[np.ndarray | None] = []
+        self._camera_frame_nums: dict[str, list[int]] = {}
         self._attempt_group: h5py.Group | None = None
         self._camera_datasets: dict[str, h5py.Dataset] = {}
         self._frame_queue: Queue[tuple[str, np.ndarray] | None] = Queue(maxsize=32)
@@ -60,8 +65,13 @@ class EpisodeRecorder:
         self._drain_frames()
         self._episode = episode
         self._attempt = attempt
+        self._phantom_samples.clear()
         self._actions.clear()
         self._states.clear()
+        self._velocities.clear()
+        self._measured_ee_poses.clear()
+        self._commanded_ee_poses.clear()
+        self._camera_frame_nums.clear()
         self._discard_attempt()
         self._attempt_group = self._data.create_group("_attempt")
         self._attempt_group.create_group("obs")
@@ -88,18 +98,34 @@ class EpisodeRecorder:
             self._segments.append(Segment(node=node, task_id=task_id, start=start, end=len(self._actions)))
             self._open_node = None
 
-    def on_step(self, action: np.ndarray, view: Any) -> None:
+    def on_step(self, action: np.ndarray, view: Any, commanded_ee_pose: Pose | None = None) -> None:
         # Env 0 only. The HDF5 schema is one trajectory per demo, and the engine
         # advances the frontier lock-step across the batch anyway (DESIGN.md §5),
         # so envs 1..N would be near-duplicates rather than extra demos.
         # Recording a vectorized rollout properly needs per-env engine state.
         self._actions.append(np.asarray(action, dtype=np.float32)[0])
-        self._states.append(np.asarray(view.joints().pos, dtype=np.float32)[0])
+        joints = view.joints()
+        self._states.append(np.asarray(joints.pos, dtype=np.float32)[0])
+        self._velocities.append(np.asarray(joints.vel, dtype=np.float32)[0])
+        measured = view.tcp("robot")
+        self._measured_ee_poses.append(
+            np.concatenate([np.asarray(measured.pos)[0], np.asarray(measured.quat)[0]]).astype(np.float32)
+        )
+        self._commanded_ee_poses.append(
+            None
+            if commanded_ee_pose is None
+            else np.concatenate(
+                [np.asarray(commanded_ee_pose.pos)[0], np.asarray(commanded_ee_pose.quat)[0]]
+            ).astype(np.float32)
+        )
+        if self.workflow.scene == "panda_phantom":
+            self._phantom_samples.append(view.phantom_recording_state())
         for camera in self.cameras:
             frame = view.camera(camera)
             if frame is not None:
                 self._raise_writer_error()
                 self._frame_queue.put((camera, np.asarray(frame.to_array())))
+                self._camera_frame_nums.setdefault(camera, []).append(frame.frame_num)
             # The viewable image carries the live display mapping, so an operator changing
             # polarity or window mid-episode would change the recording. Store the renderer's
             # own signal too, which no display control can reach.
@@ -135,6 +161,47 @@ class EpisodeRecorder:
         demo.create_dataset("actions", data=np.stack(self._actions))
         obs = demo["obs"]
         obs.create_dataset("joint_pos", data=np.stack(self._states))
+        obs.create_dataset("joint_vel", data=np.stack(self._velocities))
+        if self._phantom_samples:
+            for key in ("phantom_pose", "mesh_pose", "ultrasound_probe_pose", "timestamps"):
+                dataset = obs.create_dataset(key, data=np.stack([row[key] for row in self._phantom_samples]))
+                dataset.attrs["units"] = "s" if key == "timestamps" else "m"
+                if key != "timestamps":
+                    dataset.attrs["frame"] = "world"
+                    dataset.attrs["quaternion_order"] = "wxyz"
+            if "probe_contact_force_n" in self._phantom_samples[0]:
+                force = obs.create_dataset("probe_contact_force_n", data=np.stack(
+                    [row["probe_contact_force_n"] for row in self._phantom_samples]))
+                force.attrs["units"] = "N"
+                demo.attrs["scan_contract"] = "xyz_fixed_orientation_contact_start_v1"
+            demo.attrs["phantom_recording_schema"] = 1
+
+        # ``measured_ee_pose`` is what the robot actually did (pos xyz + quat
+        # wxyz, from the tcp sensor/link); prefer it for imitation-learning
+        # targets over the raw ``actions`` command, which for a relative
+        # Cartesian scene is a tiny per-step delta, not an absolute pose, and
+        # never reflects tracking error under load. ``commanded_ee_pose`` is
+        # the absolute target a task last asked for via set_ee_target (NaN
+        # rows where no target was active, e.g. during locate/hold) -- useful
+        # to diagnose tracking error, not as the training label.
+        obs.create_dataset("measured_ee_pose", data=np.stack(self._measured_ee_poses))
+        if any(pose is not None for pose in self._commanded_ee_poses):
+            obs.create_dataset(
+                "commanded_ee_pose",
+                data=np.stack(
+                    [
+                        pose if pose is not None else np.full(7, np.nan, dtype=np.float32)
+                        for pose in self._commanded_ee_poses
+                    ]
+                ),
+            )
+        for camera, frame_nums in self._camera_frame_nums.items():
+            # Only meaningful for sensors that render on their own schedule
+            # (frame_num stays 0 for plain RGB cameras); lets a reader drop
+            # the repeated stale frames a faster control loop would otherwise
+            # record between real sensor updates.
+            if any(frame_nums):
+                obs.create_dataset(f"{camera}_frame_id", data=np.asarray(frame_nums, dtype=np.int64))
 
         demo.attrs["success"] = bool(result.succeeded)
         demo.attrs["num_samples"] = len(self._actions)

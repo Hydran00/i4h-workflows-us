@@ -12,6 +12,11 @@ gripper: false
 cameras:
 - room
 - wrist
+# ultrasound is opt-in (--ultrasound; see PandaPhantomScene.configure_args) --
+# listed here so a remote task that requires it (e.g. us_dp) lints against a
+# scene that can actually provide it. cli.py separately checks that the flag
+# is really passed whenever a task's requirements include it.
+- ultrasound
 objects:
 - table
 - organs

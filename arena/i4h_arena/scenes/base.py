@@ -14,13 +14,14 @@ import argparse
 import importlib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
+from i4h_common.manifest import SceneSpec
 
 from i4h_arena.adapters.actuation import ArenaActuation, RobotSlice
 from i4h_arena.adapters.scene_view import ArenaSceneView
-from i4h_common.manifest import SceneSpec
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,8 +232,17 @@ class Scene(ABC):
         return actuation
 
     # -- episode hooks ---------------------------------------------------
-    def on_reset(self, env: Any, view: ArenaSceneView) -> None:
-        """After ``env.reset``: snapshot randomization, pre-roll to a start pose."""
+    def on_reset(self, env: Any, view: ArenaSceneView, on_progress: Callable[[], None] | None = None) -> None:
+        """After ``env.reset``: snapshot randomization, pre-roll to a start pose.
+
+        ``on_progress``, when given, refreshes the live viewer (sensor windows,
+        app render) after a step taken during the pre-roll itself — a scene
+        that steps the sim here otherwise leaves the display frozen on the
+        previous episode's last frame until the pre-roll finishes.
+        """
+
+    def close(self) -> None:
+        """Release scene-owned external resources after a rollout."""
 
     def describe(self) -> str:
         return self.spec.description or self.name

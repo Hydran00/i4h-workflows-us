@@ -173,10 +173,10 @@ spawn = sim_utils.UsdFileCfg(
     semantic_tags=[("class", "robot")],
 )
 FRANKA_PANDA_REALSENSE_ULTRASOUND_CFG.spawn = spawn
-FRANKA_PANDA_REALSENSE_ULTRASOUND_CFG.actuators["panda_shoulder"].stiffness = 400.0
-FRANKA_PANDA_REALSENSE_ULTRASOUND_CFG.actuators["panda_shoulder"].damping = 80.0
-FRANKA_PANDA_REALSENSE_ULTRASOUND_CFG.actuators["panda_forearm"].stiffness = 400.0
-FRANKA_PANDA_REALSENSE_ULTRASOUND_CFG.actuators["panda_forearm"].damping = 80.0
+FRANKA_PANDA_REALSENSE_ULTRASOUND_CFG.actuators["panda_shoulder"].stiffness = 800.0
+FRANKA_PANDA_REALSENSE_ULTRASOUND_CFG.actuators["panda_shoulder"].damping = 150.0
+FRANKA_PANDA_REALSENSE_ULTRASOUND_CFG.actuators["panda_forearm"].stiffness = 800.0
+FRANKA_PANDA_REALSENSE_ULTRASOUND_CFG.actuators["panda_forearm"].damping = 150.0
 
 # High PD Force Control
 FRANKA_PANDA_HIGH_PD_FORCE_CFG = FRANKA_PANDA_CFG.copy()
@@ -347,7 +347,16 @@ class _ActionsCfg:
         asset_name="robot",
         joint_names=["panda_joint.*"],
         body_name="TCP",
-        controller=_DifferentialIKControllerCfg(command_type="pose", use_relative_mode=True, ik_method="dls"),
+        # lambda_val is the DLS damping coefficient: IsaacLab's unstated
+        # default is 0.01. Damping trades off final accuracy against
+        # robustness near singularities/joint limits -- higher values leave a
+        # larger steady-state gap between commanded and reached pose (the
+        # "close but not quite there" convergence), lower values close that
+        # gap faster but risk jittery/large joint deltas closer to a
+        # singularity. Halved as a moderate first step, not a proven optimum.
+        controller=_DifferentialIKControllerCfg(
+            command_type="pose", use_relative_mode=True, ik_method="dls", ik_params={"lambda_val": 0.005}
+        ),
         scale=1.0,
         body_offset=_IKActionCfg.OffsetCfg(
             pos=[0.0, 0.0, 0.0],

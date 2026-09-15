@@ -51,6 +51,8 @@ class ActionContract:
     dof: int = 0
     robots: tuple[str, ...] = ()
     gripper: str = "none"
+    observation_history: int = 1
+    observation_sample_hz: float = 0.0
 
 
 @dataclass
@@ -88,6 +90,19 @@ class Session:
                 continue
             decoded[name] = np.frombuffer(payload, dtype=np.uint8).reshape(*shape)
         return decoded
+
+    def ee_poses(self, frame: ObsFrame) -> dict[str, np.ndarray]:
+        """Decode the frame's per-robot measured end-effector pose.
+
+        Each value is ``(7,)``: ``[pos_x, pos_y, pos_z, quat_w, quat_x, quat_y,
+        quat_z]`` in the world frame. Empty when the arena side predates this
+        field (older ``ObsFrame``s decode with ``ee_pose``/``ee_robots`` at
+        their defaults, not an error, per the wire format's forward-compat rule).
+        """
+        return {
+            robot: np.asarray(frame.ee_pose[index * 7 : (index + 1) * 7], dtype=np.float64)
+            for index, robot in enumerate(frame.ee_robots)
+        }
 
 
 class PolicyServer(ABC):
@@ -344,6 +359,8 @@ class PolicyServer(ABC):
             message.action_dof = contract.dof
             message.action_robots = list(contract.robots)
             message.action_gripper = contract.gripper
+            message.observation_history = contract.observation_history
+            message.observation_sample_hz = contract.observation_sample_hz
         self.bus.publish(self.keys.task_status(task_uid), encode(message))
 
     def close(self) -> None:

@@ -10,7 +10,6 @@ configclasses (Terminations, Rewards, Events, Observations), and the
 from __future__ import annotations
 
 import logging
-import math
 from typing import TYPE_CHECKING
 
 import isaaclab.envs.mdp as base_mdp
@@ -33,10 +32,31 @@ if TYPE_CHECKING:
 
 _ULTRASOUND_TARGET_TOLERANCE_M = 0.20
 _ULTRASOUND_ALIGNMENT_THRESHOLD = 0.80
-_ULTRASOUND_MIN_SCAN_STEPS = 245
+# Was 245 (basically the scene's whole 250-step budget): that made sense when
+# this counted from a from-scratch approach, but on_reset now lands the probe
+# in contact *before* the episode starts, so the recorded episode only covers
+# the sweep itself. In verification runs the sweep + hold graph nodes reach
+# verify_scan by step ~111 regardless of the (small, +-5cm) random phantom
+# offset, so success was then blocked on ~134 steps of pure idling for no
+# reason. 120 gives roughly that same margin above the observed completion
+# point without forcing the wait back out to the full episode length.
+_ULTRASOUND_MIN_SCAN_STEPS = 120
 _ULTRASOUND_CONTACT_Z_MAX_M = 0.22
-_ULTRASOUND_TWIST_ALIGNMENT_THRESHOLD = 0.95
-_ULTRASOUND_SCAN_DISTANCE_M = 0.10
+# Was 0.95: with the rule-based workflow's intentional 30-degree rib-clearing
+# tilt, alignment during the sweep structurally tops out well below that
+# (observed ~0.83-0.87 in successful-looking runs), so twist_seen was almost
+# never set and every episode failed verify_scan regardless of how the scan
+# actually looked. Matched to _ULTRASOUND_ALIGNMENT_THRESHOLD instead of a
+# separate, stricter magic number.
+_ULTRASOUND_TWIST_ALIGNMENT_THRESHOLD = _ULTRASOUND_ALIGNMENT_THRESHOLD
+# Was 0.10: a run confirmed visually correct (contact=True, twist=True,
+# alignment=0.845) still failed verify_scan on this criterion alone, with
+# max_scan_distance measured at only 0.0116m. That is far enough below 0.10
+# that twist_seen is likely latching later in the trajectory than the
+# "twist right after contact, then sweep for 10cm" picture this constant
+# assumed -- not fully explained yet, only patched to the one data point
+# available. Revisit if failures persist despite a visually correct scan.
+_ULTRASOUND_SCAN_DISTANCE_M = 0.01
 
 
 # ---------- Reset events ------------------------------------------------------
@@ -136,6 +156,14 @@ def align_ee_handle(env: ManagerBasedRLEnv) -> torch.Tensor:
 # ---------- Terminations ------------------------------------------------------
 
 
+def probe_phantom_contact(env):
+    """Physical contact on the probe body, filtered to the phantom only."""
+    from i4h_common.ultrasound_scan import CONTACT_FORCE_THRESHOLD_N
+
+    forces = to_torch(env.scene["contact_probe_organs"].data.force_matrix_w)
+    return torch.linalg.vector_norm(forces, dim=-1).flatten(1).amax(dim=1) >= CONTACT_FORCE_THRESHOLD_N
+
+
 def ultrasound_scan_success(
     env: ManagerBasedRLEnv,
     target_tolerance_m: float = _ULTRASOUND_TARGET_TOLERANCE_M,
@@ -146,6 +174,8 @@ def ultrasound_scan_success(
     scan_distance_m: float = _ULTRASOUND_SCAN_DISTANCE_M,
 ) -> torch.Tensor:
     """Success after either direct target alignment or a completed scan trajectory."""
+    if getattr(env, "_ultrasound_preparing", False):
+        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     target_pos, ee_pos, alignment = _ultrasound_success_metrics(env)
     distance = torch.linalg.norm(target_pos - ee_pos, dim=-1)
     near_target = (distance <= target_tolerance_m) & (alignment >= alignment_threshold)
@@ -159,7 +189,7 @@ def ultrasound_scan_success(
         env._ultrasound_max_scan_distance = torch.zeros(env.num_envs, dtype=ee_pos.dtype, device=env.device)
 
     env._ultrasound_success_steps += 1
-    contact_now = ee_pos[:, 2] <= contact_z_max_m
+    contact_now = probe_phantom_contact(env)
     new_contact = contact_now & ~env._ultrasound_contact_seen
     env._ultrasound_contact_pos = torch.where(new_contact.unsqueeze(-1), ee_pos, env._ultrasound_contact_pos)
     env._ultrasound_contact_seen = env._ultrasound_contact_seen | contact_now
@@ -235,10 +265,12 @@ class _EventsCfg:
         mode="reset",
         params={
             "pose_range": {
-                "x": (-0.15, 0.15),
-                "y": (-0.15, 0.15),
+                "x": (-0.1, 0.1),
+                "y": (-0.1, 0.1),
                 "z": (-0.0, -0.0),
-                "yaw": (-math.pi / 2, math.pi / 2),
+                "roll": (0.0, 0.0),
+                "pitch": (0.0, 0.0),
+                "yaw": (0.0, 0.0),
             },
             "velocity_range": {},
             "asset_cfg": SceneEntityCfg("organs"),

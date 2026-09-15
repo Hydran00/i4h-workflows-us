@@ -14,7 +14,7 @@ import isaaclab.sim as sim_utils
 import torch
 from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 from isaaclab.markers.config import FRAME_MARKER_CFG
-from isaaclab.sensors import FrameTransformerCfg
+from isaaclab.sensors import ContactSensorCfg, FrameTransformerCfg
 from isaaclab.sensors.frame_transformer.frame_transformer_cfg import OffsetCfg
 from isaaclab.sim.schemas import CollisionBaseCfg, RigidBodyBaseCfg
 
@@ -103,6 +103,12 @@ def make_assets() -> list[ConfigAsset]:
         ConfigAsset("dome_light", dome_light),
         ConfigAsset("table", table),
         ConfigAsset("organs", organs),
+        ConfigAsset("contact_probe_organs", ContactSensorCfg(
+            # The probe collision meshes belong to panda_hand; TCP is a collider-free frame.
+            prim_path="{ENV_REGEX_NS}/Robot/panda_hand",
+            filter_prim_paths_expr=["{ENV_REGEX_NS}/organs"],
+            update_period=0.0,
+        )),
         ConfigAsset("goal_frame", goal_frame),
         ConfigAsset("mesh_to_organ_transform", mesh_to_organ_transform),
         ConfigAsset("organ_to_ee_transform", organ_to_ee_transform),

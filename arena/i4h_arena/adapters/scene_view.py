@@ -15,7 +15,6 @@ import logging
 from typing import Any
 
 import numpy as np
-
 from i4h_common.types import CameraFrame, JointState, ObjectState, Pose, quat_mul, quat_rotate
 from i4h_common.world import UnsupportedActuation
 
@@ -330,14 +329,47 @@ class ArenaSceneView:
                 self._cache[key] = None
                 return None
             frame = np.asarray(rgb)[0][..., :3].astype(np.uint8)
+            # Sensors that render on their own schedule (e.g. ultrasound at
+            # 10 Hz) expose a frame_id that only advances on a real update;
+            # a control loop stepping faster than that would otherwise record
+            # the same stale image several times with no way to tell.
+            frame_num = 0
+            try:
+                frame_num = int(_np(sensor.data.frame_id)[0])
+            except (AttributeError, TypeError, IndexError, KeyError):
+                frame_num = 0
             self._cache[key] = CameraFrame(
                 name=name,
                 height=int(frame.shape[0]),
                 width=int(frame.shape[1]),
                 data=frame.tobytes(),
                 encoding="rgb8",
+                frame_num=frame_num,
             )
         return self._cache[key]
+
+    def phantom_recording_state(self) -> dict[str, np.ndarray]:
+        """World poses for env 0, read at the same step as recorded observations.
+
+        All poses are xyz metres + quaternion wxyz. Read calibrated sensor
+        frames directly: the organ root omits the acoustic mesh offset.
+        """
+        organ = self._scene["organs"].data
+        result = {
+            "phantom_pose": np.concatenate((_np(organ.root_pos_w)[0],
+                                             _quat_wxyz(organ.root_quat_w)[0])),
+        }
+        for output, sensor in (("mesh_pose", "mesh_to_organ_transform"),
+                               ("ultrasound_probe_pose", "ee_to_us_transform")):
+            data = self._scene[sensor].data
+            result[output] = np.concatenate((_np(data.target_pos_w)[0, 0],
+                                             _quat_wxyz(data.target_quat_w)[0, 0]))
+        if "contact_probe_organs" in getattr(self._scene, "sensors", {}):
+            forces = _np(self._scene["contact_probe_organs"].data.force_matrix_w)[0]
+            result["probe_contact_force_n"] = np.asarray(np.linalg.norm(forces, axis=-1).max())
+        env = self._env.unwrapped
+        result["timestamps"] = np.asarray(float(env.common_step_counter) * float(env.step_dt))
+        return {key: np.array(value, copy=True) for key, value in result.items()}
 
     def sensor_signal(self, name: str, output: str) -> np.ndarray | None:
         """Read a sensor output in its native dtype, before any display mapping.

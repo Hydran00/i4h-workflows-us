@@ -68,6 +68,12 @@ class ArenaActuation:
         self._view = view
         self._relative_ee = relative_ee
         self._logged_ee_targets = 0
+        #: Last absolute Cartesian target requested per robot via set_ee_target,
+        #: kept independent of the relative-delta conversion below so the
+        #: recorder can capture what was actually commanded, not just the tiny
+        #: per-step delta. Persists across ticks that do not call
+        #: set_ee_target (e.g. a hold), rather than reporting a gap.
+        self._last_ee_targets: dict[str, Pose] = {}
         start = (
             np.zeros((num_envs, action_dim), dtype=np.float32) if initial is None else np.asarray(initial, np.float32)
         )
@@ -117,6 +123,7 @@ class ArenaActuation:
                 f"scene action_space is {self._action_space!r}, so this embodiment has no Cartesian "
                 f"target; workflow-lint should have rejected this via requires/provides"
             )
+        self._last_ee_targets[robot] = pose
         target = self._slice(robot)
         if self._relative_ee:
             if self._view is None:
@@ -125,6 +132,9 @@ class ArenaActuation:
             inverse = current.quat.copy()
             inverse[:, 1:] *= -1.0
             rotation_delta = quat_mul(pose.quat, inverse)
+            # q and -q encode the same rotation. Choose the shortest arc so
+            # a quaternion sign change cannot request an almost-full turn.
+            rotation_delta = np.where(rotation_delta[:, :1] < 0, -rotation_delta, rotation_delta)
             # IsaacLab's relative pose command is xyz + rotation vector.
             vector = rotation_delta[:, 1:4]
             vector_norm = np.linalg.norm(vector, axis=-1, keepdims=True)
@@ -173,6 +183,10 @@ class ArenaActuation:
             return
         target = self._slice(robot)
         self._buffer[:, target.start : target.stop] = self._previous[:, target.start : target.stop]
+
+    def last_ee_target(self, robot: str = "robot") -> Pose | None:
+        """The most recent absolute Cartesian target requested for `robot`, if any."""
+        return self._last_ee_targets.get(robot)
 
     def set_raw_action(self, values: np.ndarray, robot: str = "robot") -> None:
         """Copy a controller-native action into its robot slice."""

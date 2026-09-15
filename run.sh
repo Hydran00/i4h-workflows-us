@@ -18,6 +18,9 @@
 #   --mode NAME           any workflow-specific run mode
 #
 # Common options:
+#   --ultrasound          enable live OptiX B-mode for ultrasound_liver_scan (Docker)
+#   --ultrasound-image ID ultrasound backend image; see arena/ULTRASOUND.md
+#   --ultrasound-gpu ID   physical GPU index/UUID for the ultrasound backend
 #   --episodes N          successful episodes requested
 #   --attempts N          retries allowed per requested episode
 #   --episode-steps N     lower per-episode step cap; never raises the workflow cap
@@ -82,6 +85,7 @@ RECORD=""
 RECORD_REQUESTED=0
 PATIENT_TWIN=""
 CHECKPOINT=""
+TASK_ID=""
 POLICY_ENDPOINT=""
 ARENA_ARGS=()
 
@@ -142,6 +146,13 @@ while [ $# -gt 0 ]; do
       ARENA_ARGS+=("$1" "$CHECKPOINT")
       shift 2
       ;;
+    --task-id)
+      # Which backend serves --mode policy (default: openpi_pi0). The
+      # separately-launched backend-discovery step below needs this too, or
+      # it launches/waits on the default backend instead of the real one.
+      TASK_ID="$2"; ARENA_ARGS+=("$1" "$2"); shift 2 ;;
+    --task-id=*)
+      TASK_ID="${1#*=}"; ARENA_ARGS+=("$1"); shift ;;
     *) ARENA_ARGS+=("$1"); shift ;;
   esac
 done
@@ -252,12 +263,13 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 if [ "$NO_BACKEND" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
-  backends=$(light python - "$WORKFLOW" "$MODE" <<'PY'
+  backends=$(light python - "$WORKFLOW" "$MODE" "$TASK_ID" <<'PY'
 import sys
 from i4h_engine.loader import resolve_workflow
 from i4h_engine.registry import default_registry
 
-workflow = resolve_workflow(sys.argv[1], sys.argv[2])
+workflow_name, mode, task_id = sys.argv[1], sys.argv[2] or None, sys.argv[3]
+workflow = resolve_workflow(workflow_name, mode, **({"task_id": task_id} if task_id else {}))
 registry = default_registry()
 seen = set()
 for node in workflow.graph.nodes:

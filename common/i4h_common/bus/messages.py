@@ -100,10 +100,25 @@ class ObsFrame(Envelope):
 
     task_uid: str = ""
     step: int = 0
+    #: Seconds per tick, straight from the runner's ``TickContext.dt`` -- the
+    #: only place the real control rate lives. A backend that needs a
+    #: timestamp (not just a step count) should use ``step * dt``, never
+    #: assume a rate of its own: a scene's actual tick rate need not match
+    #: any value recorded in that scene's static manifest.
+    dt: float = 0.0
     state: list[float] = field(default_factory=list)
     state_names: list[str] = field(default_factory=list)
+    state_velocities: list[float] = field(default_factory=list)
+    # Encoded real observations, oldest first; no recursively nested histories.
+    history: list[bytes] = field(default_factory=list)
     images: dict[str, bytes] = field(default_factory=dict)
     image_shapes: dict[str, list[int]] = field(default_factory=dict)
+    #: Measured end-effector pose per robot, world frame, one 7-value
+    #: (pos_xyz, quat_wxyz) block per name in ``ee_robots``, concatenated in
+    #: the same order. A Cartesian-conditioned backend (unlike joint-space
+    #: ones) needs this; ``state``/``state_names`` alone never carry it.
+    ee_pose: list[float] = field(default_factory=list)
+    ee_robots: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -146,6 +161,8 @@ class TaskStatusMsg(Envelope):
     action_robots: list[str] = field(default_factory=list)
     #: ``last`` (final column is the jaw) | ``none``
     action_gripper: str = "none"
+    observation_history: int = 1
+    observation_sample_hz: float = 0.0
 
 
 @dataclass(slots=True)

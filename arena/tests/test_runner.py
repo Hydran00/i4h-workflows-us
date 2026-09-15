@@ -53,7 +53,7 @@ def test_live_reset_rebuilds_actuation_and_restarts_recording() -> None:
     simulation.env = SimpleNamespace(reset=lambda: calls.append("env_reset"))
     simulation._view = SimpleNamespace(invalidate=lambda: calls.append("invalidate"))
     simulation.scene = SimpleNamespace(
-        on_reset=lambda _env, _view: calls.append("scene_reset"),
+        on_reset=lambda _env, _view, on_progress=None: calls.append("scene_reset"),
         make_actuation=lambda _env, _view: replacement,
     )
     simulation.recorder = SimpleNamespace(

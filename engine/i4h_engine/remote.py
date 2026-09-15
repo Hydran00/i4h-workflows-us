@@ -124,6 +124,9 @@ class RemoteTask(Task):
         # Own tick counter rather than ctx.node_step: the timeouts below must
         # hold whoever drives this task, including a bare unit test.
         self._ticks = 0
+        self._observation_history = []
+        self._history_length = 1
+        self._sample_stride = 1
 
     # -- lifecycle -------------------------------------------------------
     def on_enter(self, ctx: TickContext, inputs: Any) -> None:
@@ -143,6 +146,9 @@ class RemoteTask(Task):
         self._waiting_for_action = False
         self._action_deadline = 0.0
         self._ticks = 0
+        self._observation_history = []
+        self._history_length = 1
+        self._sample_stride = 1
         self._ready = False
         self._ready_deadline = 0.0
         self._ready = False
@@ -210,6 +216,15 @@ class RemoteTask(Task):
         that means the wrong checkpoint is serving this task, and continuing
         would drive the robot with numbers that mean something else.
         """
+        self._history_length = ready.observation_history
+        if self._history_length < 1:
+            raise RemoteTaskError("observation_history must be positive")
+        if self._history_length > 1:
+            hz = ready.observation_sample_hz
+            intervals = 1 / (hz * ctx.dt) if hz > 0 and ctx.dt > 0 else 0
+            if intervals < 1 or not np.isclose(intervals, round(intervals)):
+                raise RemoteTaskError("Observation cadence must be an integer number of scene ticks")
+            self._sample_stride = round(intervals)
         declared = self.spec.requires.get("action_space")
         self._space = ready.action_space or declared or ctx.act.action_space
         self._layout = ready.action_layout or ("joints" if self._space != "ee_pose" else "pos_quat")
@@ -258,8 +273,26 @@ class RemoteTask(Task):
         if self.max_steps is not None and self._ticks >= self.max_steps:
             return Status.FAILURE
 
+        if self._history_length > 1 and not self._waiting_for_action:
+            if (
+                not self._observation_history
+                or ctx.node_step - self._observation_history[-1].step >= self._sample_stride
+            ):
+                self._observation_history.append(self._observation(ctx))
+                self._observation_history = self._observation_history[-self._history_length:]
+            # Warm up with real simulation steps; also align replanning with sampling.
+            if self._chunk_index >= len(self._chunk) and (
+                len(self._observation_history) < self._history_length
+                or self._observation_history[-1].step != ctx.node_step
+            ):
+                self._ticks += 1
+                ctx.act.hold()
+                return Status.RUNNING
         if self._chunk_index >= len(self._chunk) and not self._waiting_for_action:
-            ctx.bus.publish(self._obs_key, encode(self._observation(ctx)))
+            observation = self._observation(ctx)
+            if self._history_length > 1:
+                observation.history = [encode(item) for item in self._observation_history]
+            ctx.bus.publish(self._obs_key, encode(observation))
             self._waiting_for_action = True
             self._action_deadline = time.monotonic() + self.action_timeout_s
         action = self._next_action()
@@ -273,6 +306,14 @@ class RemoteTask(Task):
 
         self._ticks += 1
         self._write(ctx, np.asarray(action, dtype=np.float32))
+        if self.spec.id.startswith("us_dp/"):
+            logger.info(
+                "waypoint sent task=%s step=%d index=%d/%d time_in_plan=%.3f s "
+                "xyz_world_m=%s rotation_vector_rad=%s",
+                self.spec.id, ctx.node_step, self._chunk_index, len(self._chunk),
+                self._chunk_index * ctx.dt,
+                [float(v) for v in action[:3]], [float(v) for v in action[3:6]],
+            )
         return Status.RUNNING
 
     def on_exit(self, ctx: TickContext) -> _Outputs:
@@ -301,13 +342,23 @@ class RemoteTask(Task):
                 continue
             images[camera_name] = frame.data
             shapes[camera_name] = [frame.height, frame.width, 3]
+        ee_robots = list(self._robots or getattr(ctx.scene, "robots", ("robot",)))
+        ee_pose: list[float] = []
+        for robot in ee_robots:
+            tcp = ctx.scene.tcp(robot)
+            ee_pose.extend(float(v) for v in np.asarray(tcp.pos)[0])
+            ee_pose.extend(float(v) for v in np.asarray(tcp.quat)[0])
         return ObsFrame(
             task_uid=self._uid,
             step=ctx.node_step,
+            dt=ctx.dt,
             state=[float(v) for v in joints.pos[0]],
             state_names=list(joints.names),
+            state_velocities=[float(v) for v in joints.vel[0]],
             images=images,
             image_shapes=shapes,
+            ee_pose=ee_pose,
+            ee_robots=ee_robots,
         )
 
     def _next_action(self) -> list[float] | None:

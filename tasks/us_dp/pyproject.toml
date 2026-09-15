@@ -1,0 +1,32 @@
+[project]
+name = "i4h-tasks-us-dp"
+version = "0.1.0"
+description = "us_dp diffusion-over-splines policy service for i4h workflows (Franka ultrasound liver scan)."
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "i4h-common",
+    "us-dp",
+    # usdsgen (USFM) is installed --no-deps (see setup notes); scipy is the
+    # one runtime dependency of its vision_transformer.py import path.
+    "scipy",
+]
+
+[project.scripts]
+i4h-tasks-us-dp = "i4h_tasks.us_dp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["i4h_tasks"]
+
+[tool.uv.sources]
+i4h-common = { path = "../../common", editable = true }
+us-dp = { path = "../../../us_dp", editable = true }
+
+[tool.ruff]
+line-length = 120

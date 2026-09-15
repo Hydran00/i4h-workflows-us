@@ -264,3 +264,22 @@ def test_observation_carries_state_names_from_the_scene(ctx, bus):
     # Joint names come from the live scene, not from a manifest copy of them.
     assert backend.obs_seen[0].state_names == list(ctx.scene.joints().names)
     assert len(backend.obs_seen[0].state) == 6
+
+
+def test_real_history_collected_during_warmup_and_execution(ctx, bus):
+    task, backend, keys = _wire(ctx, bus)
+    ctx.dt = 0.02
+    task.on_enter(ctx, None)
+    bus.publish(keys.task_status(task._uid), encode(TaskStatusMsg(
+        task_uid=task._uid, status="ready", observation_history=3, observation_sample_hz=10,
+    )))
+    for step in range(16):
+        ctx.node_step = step
+        assert task.tick(ctx) is Status.RUNNING
+        if step < 10:
+            assert not backend.obs_seen
+    assert len(backend.obs_seen) == 2
+    histories = [[decode(item, ObsFrame) for item in frame.history] for frame in backend.obs_seen]
+    assert [[item.step for item in history] for history in histories] == [[0, 5, 10], [5, 10, 15]]
+    assert all(len(item.state_velocities) == len(item.state) for h in histories for item in h)
+    assert all(not item.history for h in histories for item in h)

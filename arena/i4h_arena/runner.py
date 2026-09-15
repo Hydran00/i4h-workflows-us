@@ -246,7 +246,7 @@ class SimulationRunner:
         else:
             self.env.reset()
         self._view.invalidate()
-        self.scene.on_reset(self.env, self._view)
+        self.scene.on_reset(self.env, self._view, on_progress=self._refresh_live_view)
         # Reset invalidates the command that was seeded when the runner was
         # constructed (and every previous episode's last command).  Rebuild it
         # from the freshly reset articulation/TCP before any Wait/Hold node can
@@ -307,7 +307,7 @@ class SimulationRunner:
                 self._view.invalidate()
             self._update_sensor_windows()
             if self.recorder is not None:
-                self.recorder.on_step(self._actuation.numpy(), self._view)
+                self.recorder.on_step(self._actuation.numpy(), self._view, self._actuation.last_ee_target())
             if self.publisher is not None:
                 active = engine.active_nodes
                 self.publisher.publish(self._view, node=active[0] if active else "", episode_index=episode)
@@ -329,7 +329,7 @@ class SimulationRunner:
         """Reset simulator state without tearing down the active teleop node."""
         self.env.reset()
         self._view.invalidate()
-        self.scene.on_reset(self.env, self._view)
+        self.scene.on_reset(self.env, self._view, on_progress=self._refresh_live_view)
         self._actuation = self.scene.make_actuation(self.env, self._view)
         engine.replace_actuation(ctx, self._actuation)
         if self.recorder is not None:
@@ -377,6 +377,12 @@ class SimulationRunner:
     def _update_sensor_windows(self) -> None:
         for window in self._sensor_windows:
             window.update()
+
+    def _refresh_live_view(self) -> None:
+        """Push a step taken outside the main loop (e.g. a scene's on_reset pre-roll) to the viewer."""
+        self._view.invalidate()
+        self._update_sensor_windows()
+        self.app.update()
 
     def _step_dt(self) -> float:
         unwrapped = self.env.unwrapped
