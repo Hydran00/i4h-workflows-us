@@ -18,6 +18,8 @@ from isaaclab.sensors import ContactSensorCfg, FrameTransformerCfg
 from isaaclab.sensors.frame_transformer.frame_transformer_cfg import OffsetCfg
 from isaaclab.sim.schemas import CollisionBaseCfg, RigidBodyBaseCfg
 
+from i4h_common.ultrasound_scan import SWEEP
+
 from i4h_arena.assets.config_asset import ConfigAsset
 from i4h_arena.assets.constants import PHANTOM_USD, TABLE_WITH_COVER_USD
 from i4h_arena.tensor_utils import quat_from_euler_degrees
@@ -50,7 +52,7 @@ def make_assets() -> list[ConfigAsset]:
     organs = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/organs",
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=[0.6, 0.0, 0.09],
+            pos=[0.5, 0.0, 0.09],
             rot=quat_from_euler_degrees(torch.tensor([0.0, 0.0, 180.0])),
         ),
         spawn=sim_utils.UsdFileCfg(
@@ -69,7 +71,7 @@ def make_assets() -> list[ConfigAsset]:
             FrameTransformerCfg.FrameCfg(
                 prim_path="{ENV_REGEX_NS}/organs",
                 name="goal_frame",
-                offset=OffsetCfg(pos=(0.0, -0.25, 0.75), rot=(1.0, 0.0, 0.0, 0.0)),
+                offset=OffsetCfg(pos=SWEEP[-1], rot=(1.0, 0.0, 0.0, 0.0)),
             ),
         ],
     )
@@ -107,7 +109,11 @@ def make_assets() -> list[ConfigAsset]:
             # The probe collision meshes belong to panda_hand; TCP is a collider-free frame.
             prim_path="{ENV_REGEX_NS}/Robot/panda_hand",
             filter_prim_paths_expr=["{ENV_REGEX_NS}/organs"],
+            track_contact_points=True,
             update_period=0.0,
+            # A sliding probe generates more than the default 4 contact points against
+            # the phantom mesh; leaving this unset drops data and warns every step.
+            max_contact_data_count_per_prim=16,
         )),
         ConfigAsset("goal_frame", goal_frame),
         ConfigAsset("mesh_to_organ_transform", mesh_to_organ_transform),

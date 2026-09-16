@@ -196,6 +196,7 @@ class TaskGraph:
         *,
         max_steps: int | None = None,
         timeout_success: Callable[[Any], Any] | None = None,
+        success: Callable[[Any], Any] | None = None,
         description: str = "",
     ) -> None:
         self.max_steps = max_steps
@@ -203,6 +204,17 @@ class TaskGraph:
         #: is exhausted. Some legacy evaluations accept a weaker terminal
         #: condition than their early-success predicate.
         self.timeout_success = timeout_success
+        #: Optional early-success predicate, evaluated at the start of every
+        #: tick regardless of which node is active. Some scenes register their
+        #: success condition as a ``time_out=False`` IsaacLab termination term
+        #: so a task can read it via ``ctx.scene.termination(...)``; IsaacLab
+        #: auto-resets any env whose termination fires, in the same
+        #: ``env.step`` call, before the graph's own verify/hold node gets a
+        #: chance to react. Checking this predicate every tick lets the engine
+        #: accept that success immediately instead of ticking further nodes
+        #: against an already-reset scene until an unrelated node timeout
+        #: eventually reports failure.
+        self.success = success
         self.description = description
         self._nodes: dict[str, Node] = {}
         self._edges: list[Edge] = []

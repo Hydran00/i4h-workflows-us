@@ -237,6 +237,28 @@ def test_timeout_success_can_accept_a_legacy_terminal_fallback(ctx):
     assert "timeout_success" in engine.detail
 
 
+def test_success_predicate_finishes_regardless_of_active_node(ctx):
+    # A sensor-driven success condition (e.g. an IsaacLab termination term
+    # that can also silently auto-reset the underlying env) can turn true
+    # while an unrelated node is still active. The graph-wide predicate must
+    # be accepted immediately instead of waiting for a dedicated node to
+    # notice it, so the workflow does not keep ticking against state that
+    # has already moved on.
+    long_running = Counter(1000, name="a")
+    triggered = {"value": False}
+    workflow = TaskGraph(success=lambda _ctx: triggered["value"]).flow(node(long_running))
+    engine = Engine(workflow)
+    engine.start(ctx)
+    engine.tick(ctx)
+    assert engine.status is WorkflowStatus.RUNNING
+    triggered["value"] = True
+    engine.tick(ctx)
+    assert engine.status is WorkflowStatus.SUCCEEDED
+    assert "success predicate" in engine.detail
+    # The still-active counter node never reached its own success condition.
+    assert long_running.seen < long_running.steps
+
+
 def test_abort_calls_on_abort(ctx):
     a = Counter(1000, name="a")
     engine = Engine(TaskGraph().flow(node(a)))

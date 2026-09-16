@@ -25,7 +25,15 @@ from i4h_workflow_modes.teleop import teleop
 def rule_based() -> TaskGraph:
     """Scan XYZ after the Scene has aligned and landed the probe before recording."""
     locate = node(Locate("organs", name="locate"))
-    graph = TaskGraph(description="Fixed-orientation XYZ sweep starting in physical contact.").flow(locate)
+    # IsaacLab auto-resets the env the instant the geometric success
+    # termination fires, even if that happens mid-sweep before the graph
+    # reaches verify_scan (see ultrasound_scan_success, time_out=False, in
+    # envcfg/panda_phantom.py). Checking `success` every tick here lets the
+    # engine accept that pulse immediately instead of ticking sweep/hold
+    # nodes against an already-reset scene until verify_scan times out.
+    graph = TaskGraph(
+        description="Fixed-orientation XYZ sweep starting in physical contact.", success=success
+    ).flow(locate)
     previous = locate
     last_sweep_index = len(SWEEP) - 1
     for index, offset in enumerate(SWEEP):
@@ -55,7 +63,7 @@ def rule_based() -> TaskGraph:
         graph.wire(locate.out.pose, waypoint.in_.target)
         previous = waypoint
 
-    # Allow the existing scan-duration gate to finish within the unchanged scene cap.
+    # Allow the distance-to-target termination to register after the final sweep.
     hold = node(Hold(0.2, name="hold"))
     verify = node(WaitUntil(success, timeout_s=5.0, name="verify_scan"))
     graph.flow(previous >> hold >> verify)

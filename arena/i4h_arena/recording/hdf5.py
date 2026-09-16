@@ -27,6 +27,15 @@ logger = logging.getLogger("i4h_arena.recording")
 #: Display-independent sensor output stored beside each camera image when a sensor offers it.
 SIGNAL_OUTPUT = "attenuation"
 
+_GREEN = "\033[92m"
+_RED = "\033[91m"
+_RESET = "\033[0m"
+
+
+def _print_episode_outcome(succeeded: bool, message: str) -> None:
+    color = _GREEN if succeeded else _RED
+    print(f"{color}{message}{_RESET}", flush=True)
+
 
 class EpisodeRecorder:
     """Stream camera frames to a temporary group, then commit or discard it."""
@@ -151,6 +160,7 @@ class EpisodeRecorder:
 
         if not keep or not self._actions:
             logger.info("discarding episode %s attempt %s (%s)", result.index, result.attempt, result.status.value)
+            _print_episode_outcome(False, f"FAILED — episode {result.index} attempt {result.attempt} discarded")
             self._discard_attempt()
             return
 
@@ -224,6 +234,8 @@ class EpisodeRecorder:
             len(self._segments),
             result.status.value,
         )
+        outcome = "SUCCEEDED" if result.succeeded else "FAILED"
+        _print_episode_outcome(result.succeeded, f"{outcome} — saved {name} ({result.status.value})")
 
     def _append_frame(self, camera: str, frame: np.ndarray) -> None:
         if self._attempt_group is None:

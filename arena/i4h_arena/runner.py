@@ -178,7 +178,7 @@ class SimulationRunner:
 
     # -- events ----------------------------------------------------------
     def _on_event(self, event: WorkflowEvent) -> None:
-        logger.info("%s", event)
+        logger.debug("%s", event)
         if self.recorder is not None:
             self.recorder.on_event(event)
         if self.bus is not None:

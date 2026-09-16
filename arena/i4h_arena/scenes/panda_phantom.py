@@ -22,6 +22,21 @@ from i4h_arena.scenes.base import Scene
 class PandaPhantomScene(Scene):
     name = "panda_phantom"
 
+    # Lateral (local x/y) random offset applied to the fixed APPROACH/CONTACT
+    # landing point, so the probe lands at a different spot on the phantom
+    # each episode instead of always the same point. Exceeds the existing
+    # scripted SWEEP excursion (~6-7cm in x/y, see
+    # i4h_common.ultrasound_scan.SWEEP), so some landing points may fall
+    # outside the previously-scanned surface area; NOT yet validated live for
+    # collision/reachability/success-threshold impact at the range edges.
+    _LANDING_RANDOMIZATION_XY_M = 0.05
+
+    # Height above the (randomized) landing spot, in metres, below which the
+    # descent loop switches from its fast closing rate to the original slow,
+    # careful one. Contact is still detected and stopped for at any height —
+    # this only controls how far above the surface the probe slows down.
+    _HOVER_STANDOFF_M = 0.03
+
     def configure_args(self, args):
         super().configure_args(args)
         if getattr(args, "ultrasound", False) and "ultrasound" not in self.spec.cameras:
@@ -76,18 +91,13 @@ class PandaPhantomScene(Scene):
                         # sensor's own update clock runs at half of what
                         # 1/control_hz would suggest, hence the extra factor.
                         update_period=1.0 / (2 * self.spec.control_hz),
-                        # ~1cm above the world-Z the probe actually converges
-                        # to at contact (measured 0.196-0.197m across several
-                        # recorded runs, consistently, via obs/measured_ee_pose
-                        # at the end of the make_contact segment). A first
-                        # attempt reused the workflow's own coarse
-                        # _ULTRASOUND_CONTACT_Z_MAX_M=0.22 gate directly, which
-                        # activated too early (confirmed visually); a second
-                        # attempt overcorrected to 0.13, which is BELOW the
-                        # reachable range, so the sensor never activated at
-                        # all. 0.20 sits just above the measured convergence
-                        # height instead of a boundary borrowed from elsewhere.
-                        activation_height_m=0.20,
+                        # Any contact-force or estimated moment component activates imaging.
+                        contact_sensor="contact_probe_organs",
+                        contact_force_threshold_n=1e-5,
+                        # The contact proxy can register force with the acoustic
+                        # face about 25 mm from the Skin mesh. Keep acquiring
+                        # across brief force dropouts at that calibrated gap.
+                        skin_distance_threshold_m=0.03,
                         image=self.args.ultrasound_image,
                         gpu=self.args.ultrasound_gpu,
                     ),
@@ -158,8 +168,19 @@ class PandaPhantomScene(Scene):
         orientation_wxyz = scan_orientation(phantom.quat)
         # Public Pose is wxyz; this pinned IsaacLab build uses xyzw.
         target_quat = torch.as_tensor(orientation_wxyz[:, [1, 2, 3, 0]], device=device)
-        approach_world = phantom.pos + quat_rotate(phantom.quat, np.broadcast_to(APPROACH, phantom.pos.shape))
-        contact_world = phantom.pos + quat_rotate(phantom.quat, np.broadcast_to(CONTACT, phantom.pos.shape))
+        # Same random per-env (dx, dy, 0) local offset on both waypoints, so the
+        # approach-to-contact motion stays a straight vertical descent and only
+        # the landing spot on the phantom surface varies.
+        landing_offset = np.zeros(phantom.pos.shape, dtype=phantom.pos.dtype)
+        landing_offset[:, :2] = np.random.uniform(
+            -self._LANDING_RANDOMIZATION_XY_M, self._LANDING_RANDOMIZATION_XY_M, size=(phantom.pos.shape[0], 2)
+        )
+        contact_world = phantom.pos + quat_rotate(
+            phantom.quat, np.broadcast_to(CONTACT, phantom.pos.shape) + landing_offset
+        )
+        approach_world = phantom.pos + quat_rotate(
+            phantom.quat, np.broadcast_to(APPROACH, phantom.pos.shape) + landing_offset
+        )
         target_pos = torch.as_tensor(approach_world, device=device, dtype=torch.float32)
 
         def servo(position):
@@ -190,15 +211,24 @@ class PandaPhantomScene(Scene):
         else:
             raise RuntimeError("Probe could not reach the aligned pre-contact pose; episode not started")
 
-        if getattr(self.args, "mode", None) in ("rule-based", "policy"):
+        if getattr(self.args, "mode", None) in ("rule-based", "policy", "teleop"):
             stable = torch.zeros(num_envs, dtype=torch.long, device=device)
             required = max(1, round(CONTACT_SETTLE_S / unwrapped.step_dt))
             bottom = torch.as_tensor(contact_world, device=device, dtype=torch.float32)
-            # Slow autonomous descent; stop lowering each probe as soon as it contacts.
+            # A few cm above the actual (randomized-per-episode) landing spot;
+            # above this the surface is never expected, so it's safe to close
+            # in faster than the final, deliberately gentle approach speed.
+            hover_z = bottom[:, 2] + self._HOVER_STANDOFF_M
+            # Autonomous descent; stop lowering each probe as soon as it
+            # contacts, at any height — this is what actually protects the
+            # phantom, not the target height, since a randomized landing spot
+            # can sit higher than the nominal CONTACT offset assumes.
             for _ in range(500):
                 touching = probe_phantom_contact(unwrapped)
+                far = target_pos[:, 2] > hover_z
+                rate = torch.where(far, 0.6, 0.08) * unwrapped.step_dt
                 target_pos[:, 2] = torch.where(touching, target_pos[:, 2],
-                    torch.maximum(target_pos[:, 2] - 0.08 * unwrapped.step_dt, bottom[:, 2]))
+                    torch.maximum(target_pos[:, 2] - rate, bottom[:, 2]))
                 servo(target_pos)
                 touching = probe_phantom_contact(unwrapped)
                 stable = torch.where(touching, stable + 1, torch.zeros_like(stable))
@@ -213,5 +243,7 @@ class PandaPhantomScene(Scene):
         self._scan_start_target = (target_pos.detach().cpu().numpy(), orientation_wxyz.copy())
         env_ids = torch.arange(num_envs, device=device)
         reset_ultrasound_success_state(unwrapped, env_ids)
+        # Start the scan timer only after the approach/contact pre-roll completes.
+        unwrapped.episode_length_buf[:] = 0
         unwrapped._ultrasound_preparing = False
         view.invalidate()

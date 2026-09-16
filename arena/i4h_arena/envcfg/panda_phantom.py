@@ -9,7 +9,6 @@ configclasses (Terminations, Rewards, Events, Observations), and the
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING
 
 import isaaclab.envs.mdp as base_mdp
@@ -25,38 +24,8 @@ from isaaclab_arena.tasks.task_base import TaskBase
 
 from i4h_arena.tensor_utils import to_torch
 
-logger = logging.getLogger("i4h_arena.ultrasound")
-
-if TYPE_CHECKING:
-    from isaaclab.envs import ManagerBasedEnv, ManagerBasedRLEnv
-
-_ULTRASOUND_TARGET_TOLERANCE_M = 0.20
-_ULTRASOUND_ALIGNMENT_THRESHOLD = 0.80
-# Was 245 (basically the scene's whole 250-step budget): that made sense when
-# this counted from a from-scratch approach, but on_reset now lands the probe
-# in contact *before* the episode starts, so the recorded episode only covers
-# the sweep itself. In verification runs the sweep + hold graph nodes reach
-# verify_scan by step ~111 regardless of the (small, +-5cm) random phantom
-# offset, so success was then blocked on ~134 steps of pure idling for no
-# reason. 120 gives roughly that same margin above the observed completion
-# point without forcing the wait back out to the full episode length.
-_ULTRASOUND_MIN_SCAN_STEPS = 120
-_ULTRASOUND_CONTACT_Z_MAX_M = 0.22
-# Was 0.95: with the rule-based workflow's intentional 30-degree rib-clearing
-# tilt, alignment during the sweep structurally tops out well below that
-# (observed ~0.83-0.87 in successful-looking runs), so twist_seen was almost
-# never set and every episode failed verify_scan regardless of how the scan
-# actually looked. Matched to _ULTRASOUND_ALIGNMENT_THRESHOLD instead of a
-# separate, stricter magic number.
-_ULTRASOUND_TWIST_ALIGNMENT_THRESHOLD = _ULTRASOUND_ALIGNMENT_THRESHOLD
-# Was 0.10: a run confirmed visually correct (contact=True, twist=True,
-# alignment=0.845) still failed verify_scan on this criterion alone, with
-# max_scan_distance measured at only 0.0116m. That is far enough below 0.10
-# that twist_seen is likely latching later in the trajectory than the
-# "twist right after contact, then sweep for 10cm" picture this constant
-# assumed -- not fully explained yet, only patched to the one data point
-# available. Revisit if failures persist despite a visually correct scan.
-_ULTRASOUND_SCAN_DISTANCE_M = 0.01
+_ULTRASOUND_TARGET_TOLERANCE_M = 0.03
+_ULTRASOUND_MAX_TCP_SPEED_M_S = 0.005
 
 
 # ---------- Reset events ------------------------------------------------------
@@ -82,22 +51,18 @@ def reset_panda_joints_by_fraction_of_limits(
     joint_pos = torch.clamp(joint_pos, joint_limits[:, :, 0], joint_limits[:, :, 1])
 
     asset.write_joint_state_to_sim_index(position=joint_pos, velocity=joint_vel, env_ids=env_ids)
+    # Teleporting joint state does not replace targets left by the failed attempt.
+    asset.set_joint_position_target_index(target=joint_pos, env_ids=env_ids)
+    asset.set_joint_velocity_target_index(target=joint_vel, env_ids=env_ids)
+    asset.set_joint_effort_target_index(target=torch.zeros_like(joint_pos), env_ids=env_ids)
 
 
 def reset_ultrasound_success_state(env: ManagerBasedEnv, env_ids: torch.Tensor) -> None:
-    attrs = (
-        "_ultrasound_success_steps",
-        "_ultrasound_contact_pos",
-        "_ultrasound_twist_pos",
-        "_ultrasound_contact_seen",
-        "_ultrasound_twist_seen",
-        "_ultrasound_max_scan_distance",
-    )
-    for attr in attrs:
-        if hasattr(env, attr):
-            getattr(env, attr)[env_ids] = 0
+    """Clear the previous episode's success diagnostics."""
     if hasattr(env, "_ultrasound_success_last"):
         delattr(env, "_ultrasound_success_last")
+    if hasattr(env, "_ultrasound_prev_tcp_pos"):
+        delattr(env, "_ultrasound_prev_tcp_pos")
 
 
 # ---------- Observations ------------------------------------------------------
@@ -167,77 +132,30 @@ def probe_phantom_contact(env):
 def ultrasound_scan_success(
     env: ManagerBasedRLEnv,
     target_tolerance_m: float = _ULTRASOUND_TARGET_TOLERANCE_M,
-    alignment_threshold: float = _ULTRASOUND_ALIGNMENT_THRESHOLD,
-    min_scan_steps: int = _ULTRASOUND_MIN_SCAN_STEPS,
-    contact_z_max_m: float = _ULTRASOUND_CONTACT_Z_MAX_M,
-    twist_alignment_threshold: float = _ULTRASOUND_TWIST_ALIGNMENT_THRESHOLD,
-    scan_distance_m: float = _ULTRASOUND_SCAN_DISTANCE_M,
+    max_tcp_speed_m_s: float = _ULTRASOUND_MAX_TCP_SPEED_M_S,
 ) -> torch.Tensor:
-    """Success after either direct target alignment or a completed scan trajectory."""
+    """Complete only within 5 cm of the goal and below 1 cm/s TCP speed."""
     if getattr(env, "_ultrasound_preparing", False):
         return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     target_pos, ee_pos, alignment = _ultrasound_success_metrics(env)
     distance = torch.linalg.norm(target_pos - ee_pos, dim=-1)
-    near_target = (distance <= target_tolerance_m) & (alignment >= alignment_threshold)
-
-    if not hasattr(env, "_ultrasound_success_steps"):
-        env._ultrasound_success_steps = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
-        env._ultrasound_contact_pos = torch.zeros(env.num_envs, 3, dtype=ee_pos.dtype, device=env.device)
-        env._ultrasound_twist_pos = torch.zeros(env.num_envs, 3, dtype=ee_pos.dtype, device=env.device)
-        env._ultrasound_contact_seen = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-        env._ultrasound_twist_seen = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-        env._ultrasound_max_scan_distance = torch.zeros(env.num_envs, dtype=ee_pos.dtype, device=env.device)
-
-    env._ultrasound_success_steps += 1
-    contact_now = probe_phantom_contact(env)
-    new_contact = contact_now & ~env._ultrasound_contact_seen
-    env._ultrasound_contact_pos = torch.where(new_contact.unsqueeze(-1), ee_pos, env._ultrasound_contact_pos)
-    env._ultrasound_contact_seen = env._ultrasound_contact_seen | contact_now
-
-    twist_now = env._ultrasound_contact_seen & (alignment >= twist_alignment_threshold)
-    new_twist = twist_now & ~env._ultrasound_twist_seen
-    env._ultrasound_twist_pos = torch.where(new_twist.unsqueeze(-1), ee_pos, env._ultrasound_twist_pos)
-    env._ultrasound_twist_seen = env._ultrasound_twist_seen | twist_now
-
-    scan_distance = torch.linalg.norm(ee_pos[:, :2] - env._ultrasound_twist_pos[:, :2], dim=-1)
-    env._ultrasound_max_scan_distance = torch.where(
-        env._ultrasound_twist_seen,
-        torch.maximum(env._ultrasound_max_scan_distance, scan_distance),
-        env._ultrasound_max_scan_distance,
+    previous = getattr(env, "_ultrasound_prev_tcp_pos", None)
+    speed = (
+        torch.linalg.norm(ee_pos - previous, dim=-1) / env.step_dt
+        if previous is not None else torch.full_like(distance, float("inf"))
     )
-    scan_complete = (
-        (env._ultrasound_success_steps >= min_scan_steps)
-        & env._ultrasound_contact_seen
-        & env._ultrasound_twist_seen
-        & (alignment >= alignment_threshold)
-        & (env._ultrasound_max_scan_distance >= scan_distance_m)
-    )
-    success = near_target | scan_complete
+    env._ultrasound_prev_tcp_pos = ee_pos.detach().clone()
+    success = (distance < target_tolerance_m) & (speed < max_tcp_speed_m_s)
     env._ultrasound_success_last = {
         "target_pos": target_pos.detach().clone(),
         "ee_pos": ee_pos.detach().clone(),
         "distance": distance.detach().clone(),
+        "tcp_speed_m_s": speed.detach().clone(),
         "alignment": alignment.detach().clone(),
-        "contact_seen": env._ultrasound_contact_seen.detach().clone(),
-        "twist_seen": env._ultrasound_twist_seen.detach().clone(),
-        "scan_distance": env._ultrasound_max_scan_distance.detach().clone(),
-        "steps": env._ultrasound_success_steps.detach().clone(),
-        "near_target": near_target.detach().clone(),
-        "scan_complete": scan_complete.detach().clone(),
         "success": success.detach().clone(),
         "target_tolerance_m": target_tolerance_m,
-        "alignment_threshold": alignment_threshold,
-        "scan_distance_threshold_m": scan_distance_m,
+        "max_tcp_speed_m_s": max_tcp_speed_m_s,
     }
-    if bool(torch.any(env._ultrasound_success_steps == min_scan_steps)):
-        logger.info(
-            "scan gate steps=%s contact=%s twist=%s alignment=%s distance_m=%s",
-            env._ultrasound_success_steps.detach().cpu().tolist(),
-            env._ultrasound_contact_seen.detach().cpu().tolist(),
-            env._ultrasound_twist_seen.detach().cpu().tolist(),
-            alignment.detach().cpu().round(decimals=4).tolist(),
-            env._ultrasound_max_scan_distance.detach().cpu().round(decimals=4).tolist(),
-        )
     return success
 
 
@@ -281,6 +199,33 @@ class _EventsCfg:
         mode="reset",
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"]), "fraction": 0.01},
     )
+    # Real ultrasound probes glide on gel-lubricated skin; without an explicit low-friction
+    # material both bodies fall back to PhysX/USD defaults, which is high enough for the
+    # probe to catch on the phantom surface instead of sliding along it.
+    organs_physics_material = EventTermCfg(
+        func=base_mdp.randomize_rigid_body_material,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("organs"),
+            "static_friction_range": (0.08, 0.08),
+            "dynamic_friction_range": (0.05, 0.05),
+            "restitution_range": (0.0, 0.0),
+            "num_buckets": 16,
+            "make_consistent": True,
+        },
+    )
+    probe_physics_material = EventTermCfg(
+        func=base_mdp.randomize_rigid_body_material,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=["panda_hand"]),
+            "static_friction_range": (0.08, 0.08),
+            "dynamic_friction_range": (0.05, 0.05),
+            "restitution_range": (0.0, 0.0),
+            "num_buckets": 16,
+            "make_consistent": True,
+        },
+    )
 
 
 @configclass
@@ -292,9 +237,16 @@ class _RewardsCfg:
     joint_vel = RewardTermCfg(func=base_mdp.joint_vel_l2, weight=-0.0001)
 
 
+def ultrasound_time_out(env):
+    """Preparation has its own bounded loops, outside the scan episode budget."""
+    if getattr(env, "_ultrasound_preparing", False):
+        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    return base_mdp.time_out(env)
+
+
 @configclass
 class _TerminationsCfg:
-    time_out = TerminationTermCfg(func=base_mdp.time_out, time_out=True)
+    time_out = TerminationTermCfg(func=ultrasound_time_out, time_out=True)
     success = TerminationTermCfg(func=ultrasound_scan_success, time_out=False)
 
 

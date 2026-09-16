@@ -10,6 +10,7 @@ stand-in for one. No zenoh, no torch, no policy stack.
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -283,3 +284,28 @@ def test_real_history_collected_during_warmup_and_execution(ctx, bus):
     assert [[item.step for item in history] for history in histories] == [[0, 5, 10], [5, 10, 15]]
     assert all(len(item.state_velocities) == len(item.state) for h in histories for item in h)
     assert all(not item.history for h in histories for item in h)
+
+
+def test_us_dp_chunk_visualizes_world_waypoints_and_clears(ctx, bus):
+    keys = Keys("test-run")
+    ctx.bus, ctx.run_id = bus, "test-run"
+    ctx.act.action_space = "ee_pose"
+    shown = []
+    cleared = []
+    ctx.scene.visualize_policy_path = lambda positions, *, current_index: shown.append((positions.copy(), current_index))
+    ctx.scene.clear_policy_path = lambda: cleared.append(True)
+    spec = replace(SPEC, project="us_dp", name="ultrasound_liver_scan")
+    task = RemoteTask(spec, keys=keys)
+    FakeBackend(bus, keys, f"{task.name}-0")
+    task.on_enter(ctx, None)
+    assert len(cleared) == 1
+    task._ready = True
+    task._space = "ee_pose"
+    task._layout = "pos_axis_angle"
+    assert task.tick(ctx) is Status.RUNNING
+    assert shown and shown[-1][0].shape == (2, 3)
+    assert shown[-1][1] == 0
+    task.tick(ctx)
+    assert shown[-1][1] == 1
+    task.on_exit(ctx)
+    assert len(cleared) == 2

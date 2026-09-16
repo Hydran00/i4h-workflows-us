@@ -171,6 +171,7 @@ class RemoteTask(Task):
             ),
         )
         self._obs_key = keys.task_obs(self._uid)
+        self._clear_policy_path(ctx)
 
         # Waiting happens in tick(), not here. Blocking on_enter stops the
         # runner stepping, which freezes the simulator window until the backend
@@ -306,6 +307,7 @@ class RemoteTask(Task):
 
         self._ticks += 1
         self._write(ctx, np.asarray(action, dtype=np.float32))
+        self._visualize_policy_path(ctx)
         if self.spec.id.startswith("us_dp/"):
             logger.info(
                 "waypoint sent task=%s step=%d index=%d/%d time_in_plan=%.3f s "
@@ -317,11 +319,28 @@ class RemoteTask(Task):
         return Status.RUNNING
 
     def on_exit(self, ctx: TickContext) -> _Outputs:
+        self._clear_policy_path(ctx)
         self._teardown()
         return _Outputs(success=self._succeeded)
 
     def on_abort(self, ctx: TickContext) -> None:
+        self._clear_policy_path(ctx)
         self._teardown()
+
+    def _visualize_policy_path(self, ctx: TickContext) -> None:
+        # The backend sends absolute world XYZ waypoints. Keep all Isaac calls
+        # in the scene adapter, and only visualize the us_dp Cartesian policy.
+        if self.spec.id.startswith("us_dp/") and self._space == "ee_pose" and self._layout == "pos_axis_angle":
+            visualize = getattr(ctx.scene, "visualize_policy_path", None)
+            if callable(visualize):
+                waypoints = np.asarray(self._chunk, dtype=np.float32)
+                visualize(waypoints[:, :3], current_index=self._chunk_index - 1)
+
+    def _clear_policy_path(self, ctx: TickContext) -> None:
+        if self.spec.id.startswith("us_dp/"):
+            clear = getattr(ctx.scene, "clear_policy_path", None)
+            if callable(clear):
+                clear()
 
     def _teardown(self) -> None:
         for latest in (self._actions, self._status):

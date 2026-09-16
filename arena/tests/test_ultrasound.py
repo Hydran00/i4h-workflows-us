@@ -88,3 +88,74 @@ def test_isaac_xyzw_quarter_turn_rotates_mesh_translation():
     position, angles = probe_in_mesh([0, 0, 0.1], [q, 0, 0, q], [0, 0, 0], [q, 0, 0, q])
     np.testing.assert_allclose(position, [0, 100, 0], atol=1e-10)
     np.testing.assert_allclose(angles, [0, 0, 0], atol=1e-10)
+
+
+def test_contact_gate_requires_measured_force_and_closes_on_separation():
+    from i4h_arena.medical.ultrasound import contact_mask
+    forces = np.zeros((3, 1, 1, 3))
+    forces[1, 0, 0, 2] = 0.11
+    forces[2, 0, 0, 2] = 0.09
+    np.testing.assert_array_equal(contact_mask(forces), [False, True, False])
+    forces[:] = 0
+    assert not contact_mask(forces).any()
+
+
+def test_closest_skin_surface_includes_triangle_interiors_and_edges(tmp_path):
+    from i4h_arena.medical.ultrasound_worker import closest_surface_point, load_triangles
+    mesh = tmp_path / 'Skin.obj'
+    mesh.write_text('v 0 0 0\nv 100 0 0\nv 0 100 0\nf 1 2 3\n')
+    triangles = load_triangles(mesh)
+    for height in (4.9, 5.0, 5.1, -4.9):
+        closest, distance = closest_surface_point([20, 20, height], triangles)
+        np.testing.assert_allclose(closest, [20, 20, 0], atol=1e-12)
+        assert distance == pytest.approx(abs(height))
+        assert (distance < 5) == (abs(height) < 5)
+    closest, distance = closest_surface_point([-3, -4, 0], triangles)
+    np.testing.assert_allclose(closest, [0, 0, 0])
+    assert distance == 5
+    closest, distance = closest_surface_point([50, -2, 0], triangles)
+    np.testing.assert_allclose(closest, [50, 0, 0])
+    assert distance == 2
+
+
+def test_fast_skin_proximity_queries_local_surface():
+    from i4h_arena.medical.ultrasound_worker import SkinProximity, closest_surface_point
+    # Uniform surface triangles: local query preserves face-interior distances.
+    triangles = np.array([[[x, y, 0], [x + 1, y, 0], [x, y + 1, 0]]
+                          for x in range(20) for y in range(20)], dtype=float)
+    skin = SkinProximity(triangles)
+    assert skin.neighbors == 16
+    for point in ([10.2, 10.2, 4.9], [0.2, 0.2, 5.1], [-1, -1, 0]):
+        actual_point, actual_distance = skin.closest(point)
+        expected_point, expected_distance = closest_surface_point(point, triangles)
+        np.testing.assert_allclose(actual_point, expected_point)
+        assert actual_distance == pytest.approx(expected_distance)
+
+
+def test_curved_probe_edge_can_remain_close_when_center_is_far():
+    from i4h_arena.medical.ultrasound_worker import SkinProximity, acoustic_face_distance, acoustic_face_points
+    triangles = np.array([[[-100, -100, 0], [100, -100, 0], [100, 100, 0]],
+                          [[-100, -100, 0], [100, 100, 0], [-100, 100, 0]]], dtype=float)
+    skin = SkinProximity(triangles)
+    rotation = [0, np.pi / 6, 0]
+    face = acoustic_face_points([0, 0, 0], rotation)
+    position = [0, 0, 1 - face[:, 2].min()]
+    assert skin.closest(position)[1] > 5
+    assert acoustic_face_distance(skin, position, rotation) == pytest.approx(1)
+    assert acoustic_face_distance(skin, [0, 0, 60], rotation) > 5
+    assert len(face) == 51
+
+
+def test_wrench_gate_any_signed_component_and_estimated_torque():
+    from i4h_arena.medical.ultrasound import contact_wrench_mask
+    force = np.zeros((5, 1, 1, 3))
+    force[0, 0, 0, 0] = -2e-5
+    force[1, 0, 0, 1] = 1e-5
+    force[2, 0, 0, 1] = 9e-6
+    points = np.zeros_like(force)
+    points[2, 0, 0, 0] = 2  # moment 1.8e-5, although force is below threshold
+    points[3] = np.nan  # no contact points when separated
+    force[4, 0, 0, 2] = 2e-5
+    points[4] = np.nan  # force alone still activates
+    np.testing.assert_array_equal(contact_wrench_mask(force, points, np.zeros((5, 3))),
+                                  [True, False, True, False, True])

@@ -256,6 +256,11 @@ class Engine:
             return self.status
 
         self.terminal_advance_requested = False
+        early_success = self.graph.success
+        if early_success is not None and satisfied(early_success(ctx)):
+            self._finish(WorkflowStatus.SUCCEEDED, ctx, detail=f"accepted success predicate at step={self.step}")
+            return self.status
+
         if self.max_steps is not None and self.step >= self.max_steps:
             timeout_success = self.graph.timeout_success
             if timeout_success is not None and satisfied(timeout_success(ctx)):

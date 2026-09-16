@@ -72,16 +72,10 @@ def launch_app(args: argparse.Namespace) -> Iterator[AppContext]:
     # ExplicitAction pairs each option with a `<name>_explicit` flag; without it
     # AppLauncher treats the value as a default and falls back to headless.
     launcher_args.visualizer_explicit = not args.headless
+    kit_args = [getattr(launcher_args, "kit_args", ""), "--/log/level=warning"]
     if args.python_server:
-        launcher_args.kit_args = " ".join(
-            part
-            for part in (
-                getattr(launcher_args, "kit_args", ""),
-                "--enable isaacsim.code_editor.python_server",
-                "--enable isaacsim.test.utils",
-            )
-            if part
-        )
+        kit_args += ["--enable isaacsim.code_editor.python_server", "--enable isaacsim.test.utils"]
+    launcher_args.kit_args = " ".join(part for part in kit_args if part)
     logger.info(
         "launching Isaac Sim (headless=%s device=%s envs=%s cameras=%s python_server=%s)",
         launcher_args.headless,

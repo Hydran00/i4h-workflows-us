@@ -60,8 +60,6 @@ class UltrasoundSensor(SensorBase):
     def _update_buffers_impl(self, env_mask):
         if self._scene is None:
             return  # Environment initialization precedes Scene.make_view binding.
-        if self._renderer is None:
-            self._renderer = UltrasoundRenderer(self.cfg.image, self.cfg.gpu)
         probe = self._scene["ee_to_us_transform"].data
         mesh = self._scene["mesh_to_organ_transform"].data
         poses = [
@@ -74,17 +72,38 @@ class UltrasoundSensor(SensorBase):
             )
         ]
         probe_pos_w = poses[0]
+        contact = None
+        if self.cfg.contact_sensor is not None:
+            from i4h_arena.medical.ultrasound import contact_wrench_mask
+
+            data = self._scene[self.cfg.contact_sensor].data
+            forces = to_torch(data.force_matrix_w).detach().cpu().numpy()
+            points = to_torch(data.contact_pos_w).detach().cpu().numpy()
+            tcp = to_torch(self._scene["ee_frame"].data.target_pos_w)[:, 0].detach().cpu().numpy()
+            contact = contact_wrench_mask(forces, points, tcp, self.cfg.contact_force_threshold_n)
         for index in np.flatnonzero(wp.to_torch(env_mask).cpu().numpy()):
-            if self.cfg.activation_height_m is not None and probe_pos_w[index, 2] > self.cfg.activation_height_m:
-                # Still well above the surface: a real probe would form no
-                # image here. Leave frame_id untouched so a reader can tell
-                # (obs/ultrasound_frame_id) that no genuine scan happened yet,
-                # rather than rendering a physically meaningless frame.
+            # Original height gate: skip rendering above the threshold.
+            if (self.cfg.activation_height_m is not None
+                    and probe_pos_w[index, 2] > self.cfg.activation_height_m):
                 continue
+            # Contact data can drop out while the probe is still almost touching
+            # the skin. In that case let the renderer check the acoustic face's
+            # distance to the skin instead of freezing the last frame.
+            near_skin_threshold = self.cfg.skin_distance_threshold_m
+            if contact is not None and contact[index]:
+                near_skin_threshold = None
+            elif contact is not None and near_skin_threshold is None:
+                continue
+            if self._renderer is None:
+                self._renderer = UltrasoundRenderer(self.cfg.image, self.cfg.gpu)
             position, angles = probe_in_mesh(*(value[index] for value in poses))
-            if int(self._data.frame_id[index]) == 0:
-                logging.getLogger(__name__).info("ultrasound mesh pose mm=%s xyz_rad=%s", position, angles)
-            frame = self._renderer.render(position, angles)
+            # if int(self._data.frame_id[index]) == 0:
+            #     logging.getLogger(__name__).info("ultrasound mesh pose mm=%s xyz_rad=%s", position, angles)
+            frame = self._renderer.render(position, angles,
+                                          skin_distance_threshold_m=near_skin_threshold)
+            if frame is None:
+                # No new acquisition: preserve the last image and frame_id.
+                continue
             self._data.output["rgb"][index] = torch.as_tensor(bmode_rgb(frame), device=self._device)
             self._data.output["bmode_db"][index, ..., 0] = torch.as_tensor(frame, device=self._device)
             self._data.frame_id[index] += 1
@@ -104,3 +123,6 @@ class UltrasoundSensorCfg(SensorBaseCfg):
     #: The scene sets this from its own calibrated contact height, not a
     #: value this generic sensor should guess.
     activation_height_m: float | None = None
+    skin_distance_threshold_m: float | None = None
+    contact_sensor: str | None = None
+    contact_force_threshold_n: float = 0.02

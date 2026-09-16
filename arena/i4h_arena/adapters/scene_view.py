@@ -80,11 +80,52 @@ class ArenaSceneView:
         self._joint_state_providers = joint_state_providers or {}
         self._root_relative = root_relative
         self._cache: dict[str, Any] = {}
+        self._policy_path_markers = None
 
     # -- lifecycle -------------------------------------------------------
     def invalidate(self) -> None:
         """Drop per-tick caches. The runner calls this after every ``env.step``."""
         self._cache.clear()
+
+    def visualize_policy_path(self, positions_world_m: np.ndarray, *, current_index: int = 0) -> None:
+        """Draw the latest us_dp plan in the Isaac viewport in world coordinates."""
+        positions = np.asarray(positions_world_m, dtype=np.float32)
+        if positions.ndim != 2 or positions.shape[1] != 3 or not len(positions) or not np.isfinite(positions).all():
+            raise ValueError("policy path must be a nonempty finite (N, 3) world-position array")
+        if self._policy_path_markers is None:
+            import isaaclab.sim as sim_utils
+            from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
+
+            self._policy_path_markers = VisualizationMarkers(
+                VisualizationMarkersCfg(
+                    prim_path="/Visuals/UltrasoundPolicyPath",
+                    markers={
+                        "future": sim_utils.SphereCfg(
+                            radius=0.004,
+                            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.85, 1.0)),
+                        ),
+                        "current": sim_utils.SphereCfg(
+                            radius=0.009,
+                            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.55, 0.0)),
+                        ),
+                        "end": sim_utils.SphereCfg(
+                            radius=0.008,
+                            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.1, 0.5)),
+                        ),
+                    },
+                )
+            )
+        indices = np.zeros(len(positions), dtype=np.int32)
+        indices[-1] = 2
+        indices[min(max(current_index, 0), len(positions) - 1)] = 1
+        if not self._policy_path_markers.is_visible():
+            self._policy_path_markers.set_visibility(True)
+        self._policy_path_markers.visualize(translations=positions, marker_indices=indices)
+
+    def clear_policy_path(self) -> None:
+        """Hide the previous plan when a policy node or episode ends."""
+        if self._policy_path_markers is not None:
+            self._policy_path_markers.set_visibility(False)
 
     @property
     def _scene(self) -> Any:

@@ -96,12 +96,15 @@ class UltrasoundRenderer:
         self._pending = bytearray(rest)
         return json.loads(line)
 
-    def render(self, position_mm, rotation_xyz_rad) -> np.ndarray:
-        request = json.dumps({"position_mm": list(position_mm), "rotation_xyz_rad": list(rotation_xyz_rad)})
+    def render(self, position_mm, rotation_xyz_rad, *, skin_distance_threshold_m=None) -> np.ndarray | None:
+        request = json.dumps({"position_mm": list(position_mm), "rotation_xyz_rad": list(rotation_xyz_rad),
+                              "skin_distance_threshold_mm": None if skin_distance_threshold_m is None else skin_distance_threshold_m * 1000.0})
         self.process.stdin.write((request + "\n").encode())
         reply = self._receive()
         if "error" in reply:
             raise RuntimeError(f"ultrasound: {reply['error']}")
+        if reply.get("inactive"):
+            return None
         if reply.get("shape") != [256, 256]:
             raise ValueError("unexpected ultrasound frame shape")
         frame = np.frombuffer(base64.b64decode(reply["db"], validate=True), dtype="<f4").reshape(256, 256).copy()
@@ -119,3 +122,26 @@ class UltrasoundRenderer:
             self.process.wait(timeout=5)
         if self.process.stdout:
             self.process.stdout.close()
+
+
+def contact_mask(forces, threshold_n=0.1):
+    """Per-environment physical contact from filtered force vectors (newtons)."""
+    forces = np.asarray(forces)
+    if forces.ndim < 2 or forces.shape[-1] != 3:
+        raise ValueError("Expected force vectors with environment and XYZ axes")
+    magnitudes = np.linalg.norm(forces, axis=-1).reshape(len(forces), -1)
+    return np.isfinite(magnitudes).all(axis=1) & (magnitudes.max(axis=1) >= threshold_n)
+
+
+def contact_wrench_mask(forces, contact_points, tcp_positions, threshold=1e-5):
+    """Any absolute world force/moment component; moment estimated at mean contact point.
+
+    This is not a measured six-axis wrench: r cross F omits distributed couples.
+    Force units are N and estimated moment units N m.
+    """
+    forces = np.asarray(forces)
+    points = np.asarray(contact_points)
+    origin = np.asarray(tcp_positions).reshape((len(forces),) + (1,) * (forces.ndim - 2) + (3,))
+    moments = np.cross(points - origin, forces)
+    wrench = np.concatenate((forces, moments), axis=-1)
+    return (np.isfinite(wrench) & (np.abs(wrench) > threshold)).reshape(len(forces), -1).any(axis=1)
